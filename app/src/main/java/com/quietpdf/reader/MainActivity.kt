@@ -58,6 +58,7 @@ fun QuietPdfApp() {
     val context = LocalContext.current
     val prefs = remember { context.getSharedPreferences("quiet_pdf", 0) }
     var dark by remember { mutableStateOf(prefs.getBoolean("dark", false)) }
+    var settingsOpen by remember { mutableStateOf(false) }
     var night by remember { mutableStateOf(false) }
     var currentUri by remember { mutableStateOf<Uri?>(null) }
     var currentName by remember { mutableStateOf("") }
@@ -140,6 +141,38 @@ fun QuietPdfApp() {
     }
 
     MaterialTheme(colorScheme = if (dark || night) darkColorScheme() else lightColorScheme()) {
+        if (settingsOpen) {
+            AlertDialog(
+                onDismissRequest = { settingsOpen = false },
+                title = { Text("Settings", fontWeight = FontWeight.SemiBold) },
+                text = {
+                    Column(verticalArrangement = Arrangement.spacedBy(14.dp)) {
+                        Text("Appearance", style = MaterialTheme.typography.labelLarge, color = MaterialTheme.colorScheme.primary)
+                        Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+                            Column(Modifier.weight(1f)) {
+                                Text("Dark theme", fontWeight = FontWeight.Medium)
+                                Text("Use a darker app interface", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                            }
+                            Switch(checked = dark, onCheckedChange = {
+                                dark = it
+                                prefs.edit().putBoolean("dark", it).apply()
+                            })
+                        }
+                        HorizontalDivider()
+                        Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+                            Column(Modifier.weight(1f)) {
+                                Text("Night reading", fontWeight = FontWeight.Medium)
+                                Text("Use the darker reading interface", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                            }
+                            Switch(checked = night, onCheckedChange = { night = it })
+                        }
+                        Text("Quiet PDF · Offline PDF reader", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    }
+                },
+                confirmButton = { TextButton(onClick = { settingsOpen = false }) { Text("Done") } },
+                shape = MaterialTheme.shapes.extraLarge
+            )
+        }
         Scaffold(
             topBar = {
                 TopAppBar(
@@ -150,6 +183,7 @@ fun QuietPdfApp() {
                         }
                     },
                     actions = {
+                        IconButton(onClick = { settingsOpen = true }) { Icon(Icons.Default.Settings, "Settings") }
                         IconButton(onClick = { night = !night }) { Icon(Icons.Default.DarkMode, "Night reading") }
                         IconButton(onClick = { dark = !dark; prefs.edit().putBoolean("dark", dark).apply() }) {
                             Icon(Icons.Default.Contrast, "Toggle theme")
@@ -253,8 +287,24 @@ fun QuietPdfApp() {
                     } ?: Box(Modifier.weight(1f).fillMaxWidth(), contentAlignment = Alignment.Center) { CircularProgressIndicator() }
                     if (message.isNotBlank()) Text(message, Modifier.fillMaxWidth().padding(8.dp), color = MaterialTheme.colorScheme.primary, style = MaterialTheme.typography.bodySmall)
                     Row(Modifier.fillMaxWidth().padding(8.dp), horizontalArrangement = Arrangement.SpaceBetween) {
-                        TextButton(onClick = { currentUri = null; renderer?.close(); renderer = null; descriptor?.close(); descriptor = null }) { Text("Library") }
-                        TextButton(onClick = { marks = marks.filterNot { it.page == page }; saveMarks(); message = "Highlights cleared on this page" }) { Text("Clear highlights") }
+                        OutlinedButton(
+                            onClick = { currentUri = null; renderer?.close(); renderer = null; descriptor?.close(); descriptor = null },
+                            shape = MaterialTheme.shapes.large,
+                            contentPadding = PaddingValues(horizontal = 18.dp, vertical = 10.dp)
+                        ) {
+                            Icon(Icons.Default.LibraryBooks, null, Modifier.size(18.dp))
+                            Spacer(Modifier.width(8.dp))
+                            Text("Library")
+                        }
+                        FilledTonalButton(
+                            onClick = { marks = marks.filterNot { it.page == page }; saveMarks(); message = "Highlights cleared on this page" },
+                            shape = MaterialTheme.shapes.large,
+                            contentPadding = PaddingValues(horizontal = 16.dp, vertical = 10.dp)
+                        ) {
+                            Icon(Icons.Default.HighlightOff, null, Modifier.size(18.dp))
+                            Spacer(Modifier.width(8.dp))
+                            Text("Clear highlights")
+                        }
                     }
                 }
             }
