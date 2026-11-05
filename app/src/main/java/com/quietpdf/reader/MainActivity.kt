@@ -8,6 +8,7 @@ import android.content.Intent
 import android.os.Bundle
 import android.os.ParcelFileDescriptor
 import androidx.activity.ComponentActivity
+import androidx.activity.compose.BackHandler
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
 import androidx.activity.result.contract.ActivityResultContracts
@@ -83,6 +84,7 @@ fun QuietPdfApp() {
     var drawing by remember { mutableStateOf(false) }
     var editMode by remember { mutableStateOf(false) }
     var fullScreen by remember { mutableStateOf(false) }
+    BackHandler(enabled = fullScreen) { fullScreen = false }
     var dragStart by remember { mutableStateOf<Offset?>(null) }
     var dragEnd by remember { mutableStateOf<Offset?>(null) }
 
@@ -392,11 +394,11 @@ private fun PdfPageItem(
 
     pageBitmap?.let { bmp ->
         Column(Modifier.fillMaxWidth().padding(horizontal = 8.dp, vertical = 5.dp)) {
-            Box(Modifier.fillMaxWidth(), contentAlignment = Alignment.TopCenter) {
+            Box(Modifier.fillMaxWidth().clickable(enabled = !editMode) { onTapPage() }, contentAlignment = Alignment.TopCenter) {
                 androidx.compose.foundation.Image(
                     bitmap = bmp.asImageBitmap(),
                     contentDescription = "PDF page ${pageIndex + 1}",
-                    modifier = Modifier.fillMaxWidth().clickable(enabled = !editMode) { onTapPage() }
+                    modifier = Modifier.fillMaxWidth()
                 )
                 Canvas(
                     Modifier.fillMaxWidth()
