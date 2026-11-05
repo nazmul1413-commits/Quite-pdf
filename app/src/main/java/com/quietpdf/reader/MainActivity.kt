@@ -149,7 +149,15 @@ fun QuietPdfApp() {
                     val points = parts[5].split(";").map { pair -> pair.split(",").let { Offset(it[0].toFloat(),it[1].toFloat()) } }
                     Annotation(parts[0].toInt(),parts[1],points,parts[2].toInt(),parts[3].toFloat(),String(Base64.decode(parts[4],Base64.DEFAULT),Charsets.UTF_8))
                 }.getOrNull()
-            } else emptyList()
+            } else {
+                // Migrate rectangle highlights created by versions 1.2–1.3.
+                prefs.getString("marks_${uri}", "")!!.lines().mapNotNull { line ->
+                    runCatching {
+                        val v=line.split(",")
+                        Annotation(v[0].toInt(),"HIGHLIGHT_BOX",listOf(Offset(v[1].toFloat(),v[2].toFloat()),Offset(v[3].toFloat(),v[4].toFloat())),0xFFFFEB3B.toInt(),0f)
+                    }.getOrNull()
+                }.also { if(it.isNotEmpty()) { annotations=it; saveAnnotations() } }
+            }
             docs = listOf(DocItem(uri.toString(), name, page)) + docs.filterNot { it.uri == uri.toString() }
             saveDocs()
             message = ""
@@ -240,6 +248,13 @@ fun QuietPdfApp() {
                                                     val y1=(1f-pts[0].y)*bounds.height; val y2=(1f-pts[1].y)*bounds.height
                                                     stream.setStrokingColor(red,green,blue); stream.setLineWidth(item.width*bounds.width)
                                                     stream.addRect(minOf(x1,x2),minOf(y1,y2),kotlin.math.abs(x2-x1),kotlin.math.abs(y2-y1)); stream.stroke()
+                                                }
+                                                "HIGHLIGHT_BOX" -> if(pts.size>=2) {
+                                                    stream.setGraphicsStateParameters(PDExtendedGraphicsState().apply { nonStrokingAlphaConstant=0.38f })
+                                                    stream.setNonStrokingColor(red,green,blue)
+                                                    val x1=pts[0].x*bounds.width; val x2=pts[1].x*bounds.width
+                                                    val y1=(1f-pts[0].y)*bounds.height; val y2=(1f-pts[1].y)*bounds.height
+                                                    stream.addRect(minOf(x1,x2),minOf(y1,y2),kotlin.math.abs(x2-x1),kotlin.math.abs(y2-y1)); stream.fill()
                                                 }
                                                 "TEXT" -> {
                                                     stream.beginText(); stream.setFont(PDType1Font.HELVETICA,12f); stream.setNonStrokingColor(red,green,blue)
@@ -560,6 +575,7 @@ private fun PdfPageItem(
                             "PEN"->drawPath(path,Color(item.color),style=androidx.compose.ui.graphics.drawscope.Stroke(item.width*size.width,cap=StrokeCap.Round))
                             "HIGHLIGHTER"->drawPath(path,Color(item.color).copy(alpha=0.30f),style=androidx.compose.ui.graphics.drawscope.Stroke(item.width*size.width,cap=StrokeCap.Round))
                             "RECTANGLE"->if(pts.size>=2)drawRect(Color(item.color),Offset(minOf(pts[0].x,pts[1].x)*size.width,minOf(pts[0].y,pts[1].y)*size.height),Size(kotlin.math.abs(pts[1].x-pts[0].x)*size.width,kotlin.math.abs(pts[1].y-pts[0].y)*size.height),style=androidx.compose.ui.graphics.drawscope.Stroke(item.width*size.width))
+                            "HIGHLIGHT_BOX"->if(pts.size>=2)drawRect(Color(item.color).copy(alpha=0.38f),Offset(minOf(pts[0].x,pts[1].x)*size.width,minOf(pts[0].y,pts[1].y)*size.height),Size(kotlin.math.abs(pts[1].x-pts[0].x)*size.width,kotlin.math.abs(pts[1].y-pts[0].y)*size.height))
                             "TEXT"->drawContext.canvas.nativeCanvas.drawText(item.text,pts[0].x*size.width,pts[0].y*size.height,AndroidPaint().apply{color=item.color;textSize=16f*density;isAntiAlias=true})
                         }
                     }
