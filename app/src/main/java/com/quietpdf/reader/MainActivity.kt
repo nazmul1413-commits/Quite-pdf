@@ -5,6 +5,8 @@ import android.graphics.Color as AndroidColor
 import android.graphics.pdf.PdfRenderer
 import android.net.Uri
 import android.content.Intent
+import android.content.ClipData
+import android.content.ClipboardManager
 import android.os.Bundle
 import android.os.ParcelFileDescriptor
 import androidx.activity.ComponentActivity
@@ -58,6 +60,7 @@ import androidx.core.view.WindowInsetsCompat
 import androidx.core.view.WindowInsetsControllerCompat
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.ImeAction
+import androidx.compose.foundation.text.selection.SelectionContainer
 import androidx.compose.foundation.text.KeyboardActions
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.ui.unit.dp
@@ -114,6 +117,7 @@ fun QuietPdfApp() {
     var searchHighlights by remember { mutableStateOf(listOf<SearchHighlight>()) }
     var searching by remember { mutableStateOf(false) }
     var searchBarOpen by remember { mutableStateOf(false) }
+    var selectedText by remember { mutableStateOf("") }
     var message by remember { mutableStateOf("") }
     var docs by remember { mutableStateOf(listOf<DocItem>()) }
     var annotations by remember { mutableStateOf(listOf<Annotation>()) }
@@ -524,6 +528,13 @@ fun QuietPdfApp() {
                                     updateAnnotations(annotations.filterNot { item -> item.page == index && item.points.any { candidate -> val dx=candidate.x-point.x; val dy=candidate.y-point.y; dx*dx+dy*dy < 0.002f } })
                                 },
                                 onTextTap = { point -> pendingText = index to point; textDraft = "" },
+                                onSelectText = { point ->
+                                    val uri = currentUri
+                                    if (uri != null) scope.launch {
+                                        val word = withContext(Dispatchers.IO) { findWordAt(context, uri, index, point) }
+                                        if (word.isNotBlank()) selectedText = word else message = "No selectable text at that position. Scanned PDFs need OCR."
+                                    }
+                                },
                                 onTapPage = { fullScreen = !fullScreen }
                             )
                         }
@@ -582,6 +593,21 @@ fun QuietPdfApp() {
             }
         }
     }
+
+    if (selectedText.isNotBlank()) AlertDialog(
+        onDismissRequest = { selectedText = "" },
+        title = { Text("Selected text") },
+        text = { SelectionContainer { Text(selectedText) } },
+        confirmButton = {
+            TextButton(onClick = {
+                val clipboard = context.getSystemService(android.content.Context.CLIPBOARD_SERVICE) as ClipboardManager
+                clipboard.setPrimaryClip(ClipData.newPlainText("PDF text", selectedText))
+                selectedText = ""
+                message = "Text copied."
+            }) { Text("Copy") }
+        },
+        dismissButton = { TextButton(onClick = { selectedText = "" }) { Text("Close") } }
+    )
 
     if (pendingText != null) AlertDialog(
         onDismissRequest = { pendingText = null },
@@ -710,13 +736,64 @@ fun QuietPdfApp() {
     }
 }
 
+private fun findWordAt(context: android.content.Context, uri: Uri, pageIndex: Int, point: Offset): String {
+    val temp = File.createTempFile("quiet_select_", ".pdf", context.cacheDir)
+    try {
+        context.contentResolver.openInputStream(uri)?.use { input ->
+            FileOutputStream(temp).use { output -> input.copyTo(output) }
+        } ?: return ""
+        PDDocument.load(temp).use { doc ->
+            if (pageIndex !in 0 until doc.numberOfPages) return ""
+            val glyphs = mutableListOf<SearchGlyph>()
+            val stripper = object : PDFTextStripper() {
+                init { startPage = pageIndex + 1; endPage = pageIndex + 1; sortByPosition = true }
+                override fun writeString(text: String, textPositions: MutableList<com.tom_roush.pdfbox.text.TextPosition>) {
+                    textPositions.forEach { pos ->
+                        (pos.unicode ?: "").forEach { ch ->
+                            glyphs.add(SearchGlyph(ch, pos.xDirAdj, (pos.yDirAdj - pos.heightDir).coerceAtLeast(0f), pos.widthDirAdj.coerceAtLeast(0.1f), pos.heightDir.coerceAtLeast(0.1f)))
+                        }
+                    }
+                    super.writeString(text, textPositions)
+                }
+            }
+            stripper.getText(doc)
+            if (glyphs.isEmpty()) return ""
+            val media = doc.getPage(pageIndex).mediaBox
+            val px = point.x * media.width
+            val py = point.y * media.height
+            val nearest = glyphs.indices.minByOrNull { i ->
+                val g = glyphs[i]
+                val dx = when { px < g.x -> g.x - px; px > g.x + g.width -> px - (g.x + g.width); else -> 0f }
+                val dy = when { py < g.y -> g.y - py; py > g.y + g.height -> py - (g.y + g.height); else -> 0f }
+                dx * dx + dy * dy
+            } ?: return ""
+            val anchor = glyphs[nearest]
+            if (kotlin.math.abs((anchor.y + anchor.height / 2f) - py) > anchor.height * 2.5f ||
+                px < anchor.x - anchor.width * 2f || px > anchor.x + anchor.width * 3f) return ""
+            val sameLine = glyphs.indices.filter { i ->
+                val g = glyphs[i]
+                kotlin.math.abs((g.y + g.height / 2f) - (anchor.y + anchor.height / 2f)) <= maxOf(anchor.height, g.height) * 0.8f
+            }.sortedBy { glyphs[it].x }
+            val position = sameLine.indexOf(nearest)
+            if (position < 0) return anchor.char.toString()
+            var left = position
+            var right = position
+            while (left > 0 && !glyphs[sameLine[left - 1]].char.isWhitespace() &&
+                glyphs[sameLine[left]].x - (glyphs[sameLine[left - 1]].x + glyphs[sameLine[left - 1]].width) < anchor.height * 1.2f) left--
+            while (right < sameLine.lastIndex && !glyphs[sameLine[right + 1]].char.isWhitespace() &&
+                glyphs[sameLine[right + 1]].x - (glyphs[sameLine[right]].x + glyphs[sameLine[right]].width) < anchor.height * 1.2f) right++
+            return (left..right).joinToString("") { glyphs[sameLine[it]].char.toString() }.trim()
+        }
+    } finally { temp.delete() }
+}
+
 @Composable
 private fun PdfPageItem(
     renderer: PdfRenderer, renderMutex: Mutex, bitmapCache: LruCache<Int, Bitmap>, renderWidth: Int,
     pageIndex: Int, annotations: List<Annotation>, searchHighlights: List<SearchHighlight>,
     documentZoom: Float,
     editMode: Boolean, activeTool: String, annotationColor: Int, onAddAnnotation: (Annotation)->Unit,
-    onErase: (Offset)->Unit, onTextTap: (Offset)->Unit, onTapPage: ()->Unit
+    onErase: (Offset)->Unit, onTextTap: (Offset)->Unit, onSelectText: (Offset)->Unit, onTapPage: ()->Unit
 ) {
     var pageBitmap by remember(pageIndex,renderer){mutableStateOf<Bitmap?>(null)}
     var strokePoints by remember(pageIndex){mutableStateOf(listOf<Offset>())}
@@ -754,7 +831,10 @@ private fun PdfPageItem(
         ){
             androidx.compose.foundation.Image(bitmap=bmp.asImageBitmap(),contentDescription="PDF page ${pageIndex+1}",modifier=Modifier.fillMaxWidth().aspectRatio(bmp.width.toFloat()/bmp.height.toFloat()),contentScale=ContentScale.FillBounds)
             Canvas(Modifier.fillMaxWidth().aspectRatio(bmp.width.toFloat()/bmp.height.toFloat()).pointerInput(editMode,activeTool,pageIndex){
-                if(editMode && activeTool=="TEXT") detectTapGestures{p->onTextTap(Offset((p.x/size.width).coerceIn(0f,1f),(p.y/size.height).coerceIn(0f,1f)))}
+                if(!editMode) detectTapGestures(onLongPress = { p ->
+                    onSelectText(Offset((p.x/size.width).coerceIn(0f,1f),(p.y/size.height).coerceIn(0f,1f)))
+                })
+                else if(activeTool=="TEXT") detectTapGestures{p->onTextTap(Offset((p.x/size.width).coerceIn(0f,1f),(p.y/size.height).coerceIn(0f,1f)))}
                 else if(editMode) detectDragGestures(
                     onDragStart={p->strokePoints=listOf(Offset((p.x/size.width).coerceIn(0f,1f),(p.y/size.height).coerceIn(0f,1f)));dragEnd=p},
                     onDrag={change,_->
