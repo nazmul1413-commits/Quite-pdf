@@ -116,7 +116,7 @@ fun QuietPdfApp() {
     var activeTool by remember { mutableStateOf("HIGHLIGHTER") }
     var annotationColor by remember { mutableIntStateOf(0xFFFFEB3B.toInt()) }
     val pageBitmapCache = remember(renderer) {
-        object : LruCache<Int, Bitmap>(72 * 1024) {
+        object : LruCache<Int, Bitmap>(128 * 1024) {
             override fun sizeOf(key: Int, value: Bitmap): Int = (value.byteCount / 1024).coerceAtLeast(1)
         }
     }
@@ -483,39 +483,17 @@ fun QuietPdfApp() {
                                 translationY = documentPan.y
                             }
                             .pointerInput(Unit) {
-                                awaitEachGesture {
-                                    awaitFirstDown(requireUnconsumed = false)
-                                    var previousCentroid = Offset.Zero
-                                    var previousSpan = 0f
-                                    var trackingPinch = false
-                                    do {
-                                        val event = awaitPointerEvent()
-                                        val pressed = event.changes.filter { it.pressed }
-                                        if (pressed.size >= 2) {
-                                            val centroid = Offset(
-                                                pressed.map { it.position.x }.average().toFloat(),
-                                                pressed.map { it.position.y }.average().toFloat()
-                                            )
-                                            val span = pressed.map {
-                                                val dx = it.position.x - centroid.x
-                                                val dy = it.position.y - centroid.y
-                                                kotlin.math.sqrt(dx * dx + dy * dy)
-                                            }.average().toFloat()
-                                            if (trackingPinch && previousSpan > 0f) {
-                                                val nextZoom = (latestDocumentZoom * (span / previousSpan)).coerceIn(1f, 5f)
-                                                documentZoom = nextZoom
-                                                if (nextZoom <= 1f) documentPan = Offset.Zero
-                                                else documentPan += centroid - previousCentroid
-                                                event.changes.forEach { if (it.pressed) it.consume() }
-                                            }
-                                            previousCentroid = centroid
-                                            previousSpan = span
-                                            trackingPinch = true
-                                        } else {
-                                            trackingPinch = false
-                                            previousSpan = 0f
-                                        }
-                                    } while (event.changes.any { it.pressed })
+                                androidx.compose.foundation.gestures.detectTransformGestures(
+                                    panZoomLock = false
+                                ) { centroid, pan, zoomChange, _ ->
+                                    val nextZoom = (documentZoom * zoomChange).coerceIn(1f, 8f)
+                                    documentZoom = nextZoom
+                                    if (nextZoom <= 1f) {
+                                        documentPan = Offset.Zero
+                                    } else {
+                                        val scaleChange = nextZoom / documentZoom.coerceAtLeast(0.001f)
+                                        documentPan = (documentPan - centroid) * scaleChange + centroid + pan
+                                    }
                                 }
                             }
                     ) {
@@ -531,7 +509,7 @@ fun QuietPdfApp() {
                                 renderer = renderer!!,
                                 renderMutex = renderMutex,
                                 bitmapCache = pageBitmapCache,
-                                renderWidth = (context.resources.displayMetrics.widthPixels * 2.0f).toInt().coerceIn(1800, 2600),
+                                renderWidth = (context.resources.displayMetrics.widthPixels * 1.8f).toInt().coerceIn(1600, 2400),
                                 pageIndex = index,
                                 annotations = annotations.filter { it.page == index },
                                 documentZoom = documentZoom,
@@ -616,42 +594,54 @@ fun QuietPdfApp() {
 
     LaunchedEffect(searching) {
         if (searching) {
-            val uri = currentUri
-            val term = query.trim().replace(Regex("\\s+"), " ")
-            if (uri == null || term.isBlank()) {
+            val pdfRenderer = renderer
+            val term = query.trim()
+            if (pdfRenderer == null || term.isBlank()) {
                 message = "Open a PDF and enter a search term."
                 searching = false
             } else {
                 message = "Searching…"
                 val outcome = withContext(Dispatchers.IO) {
                     runCatching {
-                        val temp = File.createTempFile("quiet_search_", ".pdf", context.cacheDir)
-                        try {
-                            context.contentResolver.openInputStream(uri)?.use { input ->
-                                FileOutputStream(temp).use { output -> input.copyTo(output) }
-                            } ?: error("Android could not read this PDF file.")
-                            PDDocument.load(temp).use { doc ->
-                                val matches = ArrayList<Int>()
-                                val stripper = PDFTextStripper().apply {
-                                    sortByPosition = true
-                                    setShouldSeparateByBeads(false)
+                        val matches = ArrayList<Int>()
+                        // Android's native PDF search engine is used on Android 15+
+                        // because it returns actual page matches and avoids re-parsing
+                        // a temporary copy of the document for every search.
+                        if (android.os.Build.VERSION.SDK_INT >= 35) {
+                            for (index in 0 until pdfRenderer.pageCount) {
+                                renderMutex.withLock {
+                                    pdfRenderer.openPage(index).use { pdfPage ->
+                                        if (pdfPage.searchText(term).isNotEmpty()) matches.add(index)
+                                    }
                                 }
-                                for (index in 0 until doc.numberOfPages) {
-                                    stripper.startPage = index + 1
-                                    stripper.endPage = index + 1
-                                    val extracted = stripper.getText(doc)
-                                    val normalized = extracted
-                                        .replace('\u00A0', ' ')
-                                        .replace(Regex("[\\t\\r\\n\\u000C]+"), " ")
-                                        .replace(Regex(" +"), " ")
-                                        .trim()
-                                    if (normalized.contains(term, ignoreCase = true)) matches.add(index)
-                                }
-                                matches
                             }
-                        } finally {
-                            temp.delete()
+                        } else {
+                            val uri = currentUri ?: error("The PDF is no longer open.")
+                            val temp = File.createTempFile("quiet_search_", ".pdf", context.cacheDir)
+                            try {
+                                context.contentResolver.openInputStream(uri)?.use { input ->
+                                    FileOutputStream(temp).use { output -> input.copyTo(output) }
+                                } ?: error("Android could not read this PDF file.")
+                                PDDocument.load(temp).use { doc ->
+                                    val stripper = PDFTextStripper().apply {
+                                        sortByPosition = true
+                                        setShouldSeparateByBeads(false)
+                                    }
+                                    for (index in 0 until doc.numberOfPages) {
+                                        stripper.startPage = index + 1
+                                        stripper.endPage = index + 1
+                                        val extracted = stripper.getText(doc)
+                                            .replace('\u00A0', ' ')
+                                            .replace(Regex("[\\t\\r\\n\\u000C]+"), " ")
+                                            .replace(Regex(" +"), " ")
+                                        if (extracted.contains(term, ignoreCase = true)) matches.add(index)
+                                    }
+                                }
+                            } finally {
+                                temp.delete()
+                            }
                         }
+                        matches
                     }
                 }
                 outcome.onSuccess { matches ->
@@ -661,7 +651,7 @@ fun QuietPdfApp() {
                         listState.animateScrollToItem(matches.first())
                         message = "Found on ${matches.size} page(s)."
                     } else {
-                        message = "No selectable text found for “${term}”. This may be a scanned PDF; OCR is not yet supported."
+                        message = "No text match for “${term}”. Scanned/image-only PDFs need OCR."
                     }
                 }.onFailure { error ->
                     searchResults = emptyList()
