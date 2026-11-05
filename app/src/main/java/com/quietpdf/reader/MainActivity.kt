@@ -711,7 +711,6 @@ fun QuietPdfApp() {
                             temp.delete()
                         }
                         Pair(matches, highlights)
-                        matches
                     }
                 }
                 outcome.onSuccess { result ->
