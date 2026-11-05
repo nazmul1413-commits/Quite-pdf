@@ -487,19 +487,9 @@ fun QuietPdfApp() {
                     Box(
                         modifier = Modifier.weight(1f).fillMaxWidth()
                             .background(if (dark || night) Color(0xFF202020) else Color(0xFFF7F7F7))
-                            .clipToBounds()
-                            .graphicsLayer {
-                                // Use a top-left transform origin because gesture centroids are
-                                // reported in this Box's local coordinates.
-                                transformOrigin = TransformOrigin(0f, 0f)
-                                scaleX = documentZoom
-                                scaleY = documentZoom
-                                translationX = documentPan.x
-                                translationY = documentPan.y
-                            }
+                            // Read pointer positions in the untransformed viewport coordinate
+                            // space; applying graphicsLayer first makes focal-point math drift.
                             .pointerInput(Unit) {
-                                // Only a two-finger gesture may transform the document.
-                                // One-finger drags are left untouched for LazyColumn scrolling.
                                 awaitEachGesture {
                                     awaitFirstDown(requireUnconsumed = false)
                                     var previousCentroid: Offset? = null
@@ -523,8 +513,14 @@ fun QuietPdfApp() {
                                                 val newScale = (oldScale * (span / previousSpan)).coerceIn(1f, 4f)
                                                 val ratio = newScale / oldScale
                                                 val panDelta = centroid - oldCentroid
-                                                documentPan = if (newScale <= 1f) Offset.Zero else
-                                                    (documentPan - oldCentroid) * ratio + oldCentroid + panDelta
+                                                val rawPan = if (newScale <= 1f) Offset.Zero else
+                                                    documentPan * ratio + oldCentroid * (1f - ratio) + panDelta
+                                                val maxX = size.width * (1f - newScale)
+                                                val maxY = size.height * (1f - newScale)
+                                                documentPan = Offset(
+                                                    rawPan.x.coerceIn(maxX, 0f),
+                                                    rawPan.y.coerceIn(maxY, 0f)
+                                                )
                                                 documentZoom = newScale
                                             }
                                             previousCentroid = centroid
@@ -538,6 +534,14 @@ fun QuietPdfApp() {
                                     }
                                 }
                             }
+                            .graphicsLayer {
+                                transformOrigin = TransformOrigin(0f, 0f)
+                                scaleX = documentZoom
+                                scaleY = documentZoom
+                                translationX = documentPan.x
+                                translationY = documentPan.y
+                            }
+                            .clipToBounds()
                     ) {
                     LazyColumn(
                         state = listState,
@@ -568,7 +572,7 @@ fun QuietPdfApp() {
                                     val uri = currentUri
                                     if (uri != null) scope.launch {
                                         val extracted = withContext(Dispatchers.IO) {
-                                            extractPageText(context, uri, index)
+                                            extractDocumentText(context, uri)
                                         }
                                         if (extracted.isNotBlank()) {
                                             selectedTextValue = TextFieldValue(extracted)
@@ -654,10 +658,10 @@ fun QuietPdfApp() {
 
     if (selectedTextValue.text.isNotBlank()) AlertDialog(
         onDismissRequest = { selectedTextValue = TextFieldValue("") },
-        title = { Text("Select text to copy") },
+        title = { Text("Select text from PDF") },
         text = {
             Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                Text("Select any words or sentences below, then tap Copy selected. If nothing is selected, Copy all is used.",
+                Text("Text from all pages is shown below. Select any words or sentences, then tap Copy selected.",
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant)
                 OutlinedTextField(
@@ -820,18 +824,16 @@ fun QuietPdfApp() {
     }
 }
 
-private fun extractPageText(context: android.content.Context, uri: Uri, pageIndex: Int): String {
-    val temp = File.createTempFile("quiet_page_text_", ".pdf", context.cacheDir)
+private fun extractDocumentText(context: android.content.Context, uri: Uri): String {
+    val temp = File.createTempFile("quiet_document_text_", ".pdf", context.cacheDir)
     try {
         context.contentResolver.openInputStream(uri)?.use { input ->
             FileOutputStream(temp).use { output -> input.copyTo(output) }
         } ?: return ""
         PDDocument.load(temp, MemoryUsageSetting.setupTempFileOnly()).use { doc ->
-            if (pageIndex !in 0 until doc.numberOfPages) return ""
             return PDFTextStripper().apply {
-                startPage = pageIndex + 1
-                endPage = pageIndex + 1
                 sortByPosition = true
+                setShouldSeparateByBeads(false)
             }.getText(doc).trim()
         }
     } catch (_: Exception) {
