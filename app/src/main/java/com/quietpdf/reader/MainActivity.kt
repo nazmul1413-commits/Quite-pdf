@@ -28,6 +28,7 @@ import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.*
@@ -442,7 +443,7 @@ fun QuietPdfApp() {
                                 activeTool = activeTool,
                                 onAddAnnotation = { item -> annotations = annotations + item; saveAnnotations() },
                                 onErase = { point ->
-                                    annotations = annotations.filterNot { item -> item.page == index && item.points.any { (it-point).getDistance() < 0.045f } }
+                                    annotations = annotations.filterNot { item -> item.page == index && item.points.any { val dx=it.x-point.x; val dy=it.y-point.y; dx*dx+dy*dy < 0.002f } }
                                     saveAnnotations()
                                 },
                                 onTextTap = { point -> pendingText = index to point; textDraft = "" },
