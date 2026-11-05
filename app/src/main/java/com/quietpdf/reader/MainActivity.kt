@@ -120,6 +120,7 @@ fun QuietPdfApp() {
     val latestDocumentZoom by rememberUpdatedState(documentZoom)
     var annotationUndo by remember { mutableStateOf(listOf<List<Annotation>>()) }
     var annotationRedo by remember { mutableStateOf(listOf<List<Annotation>>()) }
+    val listState = rememberLazyListState(initialFirstVisibleItemIndex = page)
 
     BackHandler(enabled = fullScreen) { fullScreen = false }
     var dragStart by remember { mutableStateOf<Offset?>(null) }
@@ -253,68 +254,6 @@ fun QuietPdfApp() {
         }
     }
 
-    // Export annotations into a separate PDF copy; the original remains untouched.
-    val exportLauncher = rememberLauncherForActivityResult(ActivityResultContracts.CreateDocument("application/pdf")) { destination ->
-        val source = currentUri
-        val annotationsToExport = annotations.toList()
-        if (destination != null && source != null) {
-            scope.launch {
-                val exported = withContext(Dispatchers.IO) {
-                    runCatching {
-                        val temp = File(context.cacheDir, "quiet_pdf_export_source.pdf")
-                        context.contentResolver.openInputStream(source)?.use { input ->
-                            FileOutputStream(temp).use { output -> input.copyTo(output) }
-                        } ?: error("Cannot read the original PDF")
-                        PDDocument.load(temp).use { document ->
-                            annotationsToExport.groupBy { it.page }.forEach { (pageIndex, pageMarks) ->
-                                if (pageIndex in 0 until document.numberOfPages) {
-                                    val pdfPage = document.getPage(pageIndex)
-                                    val bounds = pdfPage.mediaBox
-                                    PDPageContentStream(document, pdfPage, PDPageContentStream.AppendMode.APPEND, true, true).use { stream ->
-                                        pageMarks.forEach { item ->
-                                            val pts = item.points
-                                            if (pts.isEmpty()) return@forEach
-                                            val red=AndroidColor.red(item.color); val green=AndroidColor.green(item.color); val blue=AndroidColor.blue(item.color)
-                                            when(item.kind) {
-                                                "PEN", "HIGHLIGHTER" -> {
-                                                    if(item.kind=="HIGHLIGHTER") stream.setGraphicsStateParameters(PDExtendedGraphicsState().apply { strokingAlphaConstant=0.30f })
-                                                    stream.setStrokingColor(red,green,blue); stream.setLineWidth(item.width*bounds.width); stream.setLineCapStyle(1)
-                                                    stream.moveTo(pts[0].x*bounds.width,(1f-pts[0].y)*bounds.height)
-                                                    pts.drop(1).forEach { stream.lineTo(it.x*bounds.width,(1f-it.y)*bounds.height) }; stream.stroke()
-                                                }
-                                                "RECTANGLE" -> if(pts.size>=2) {
-                                                    val x1=pts[0].x*bounds.width; val x2=pts[1].x*bounds.width
-                                                    val y1=(1f-pts[0].y)*bounds.height; val y2=(1f-pts[1].y)*bounds.height
-                                                    stream.setStrokingColor(red,green,blue); stream.setLineWidth(item.width*bounds.width)
-                                                    stream.addRect(minOf(x1,x2),minOf(y1,y2),kotlin.math.abs(x2-x1),kotlin.math.abs(y2-y1)); stream.stroke()
-                                                }
-                                                "HIGHLIGHT_BOX" -> if(pts.size>=2) {
-                                                    stream.setGraphicsStateParameters(PDExtendedGraphicsState().apply { nonStrokingAlphaConstant=0.38f })
-                                                    stream.setNonStrokingColor(red,green,blue)
-                                                    val x1=pts[0].x*bounds.width; val x2=pts[1].x*bounds.width
-                                                    val y1=(1f-pts[0].y)*bounds.height; val y2=(1f-pts[1].y)*bounds.height
-                                                    stream.addRect(minOf(x1,x2),minOf(y1,y2),kotlin.math.abs(x2-x1),kotlin.math.abs(y2-y1)); stream.fill()
-                                                }
-                                                "TEXT" -> {
-                                                    stream.beginText(); stream.setFont(PDType1Font.HELVETICA,12f); stream.setNonStrokingColor(red,green,blue)
-                                                    stream.newLineAtOffset(pts[0].x*bounds.width,(1f-pts[0].y)*bounds.height)
-                                                    stream.showText(item.text.filter { it.code in 32..255 }.take(500)); stream.endText()
-                                                }
-                                            }
-                                        }
-                                    }
-                                }
-                            }
-                            context.contentResolver.openOutputStream(destination)?.use { output ->
-                                document.save(output)
-                            } ?: error("Cannot create the destination PDF")
-                        }
-                    }.isSuccess
-                }
-                message = if (exported) "Annotated copy saved. Your original PDF is unchanged." else "Could not export the PDF. Please try again."
-            }
-        }
-    }
 
     MaterialTheme(colorScheme = if (dark || night) darkColorScheme() else lightColorScheme()) {
         if (settingsOpen) {
@@ -358,15 +297,35 @@ fun QuietPdfApp() {
                         tonalElevation = 0.dp
                     ) {
                         Row(
-                            modifier = Modifier.fillMaxWidth().height(44.dp).padding(horizontal = 8.dp),
+                            modifier = Modifier.fillMaxWidth().height(48.dp).padding(horizontal = 8.dp),
                             horizontalArrangement = Arrangement.End,
                             verticalAlignment = Alignment.CenterVertically
                         ) {
                             IconButton(
-                                onClick = { searchBarOpen = !searchBarOpen; if (!searchBarOpen) query = "" },
+                                onClick = {
+                                    searchBarOpen = !searchBarOpen
+                                    if (!searchBarOpen) { query = ""; searchResults = emptyList() }
+                                },
                                 modifier = Modifier.size(40.dp)
                             ) {
-                                Icon(Icons.Default.Search, contentDescription = "Search in PDF")
+                                Icon(if (searchBarOpen) Icons.Default.Close else Icons.Default.Search, contentDescription = "Search in PDF")
+                            }
+                            if (searchBarOpen) {
+                                OutlinedTextField(
+                                    value = query,
+                                    onValueChange = { query = it; searchResults = emptyList() },
+                                    modifier = Modifier.width(176.dp).height(48.dp),
+                                    singleLine = true,
+                                    textStyle = MaterialTheme.typography.bodySmall,
+                                    placeholder = { Text("Find in PDF", style = MaterialTheme.typography.bodySmall) }
+                                )
+                                IconButton(
+                                    onClick = { if (query.isNotBlank() && currentUri != null) searching = true },
+                                    enabled = query.isNotBlank() && currentUri != null,
+                                    modifier = Modifier.size(40.dp)
+                                ) {
+                                    Icon(Icons.Default.ArrowForward, contentDescription = "Run search")
+                                }
                             }
                             IconButton(
                                 onClick = { settingsOpen = true },
@@ -453,24 +412,6 @@ fun QuietPdfApp() {
                             }
                         }, modifier = Modifier.size(38.dp)) { Icon(Icons.Default.Share, contentDescription = "Share PDF") }
                     }
-                    if (!fullScreen && searchBarOpen) Row(
-                        Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 2.dp),
-                        verticalAlignment = Alignment.CenterVertically
-                    ) {
-                        OutlinedTextField(
-                            value = query,
-                            onValueChange = { query = it },
-                            modifier = Modifier.weight(1f),
-                            singleLine = true,
-                            placeholder = { Text("Search in this PDF") }
-                        )
-                        IconButton(onClick = { searchResults = emptyList(); searching = true }) {
-                            Icon(Icons.Default.ArrowForward, "Run search")
-                        }
-                        IconButton(onClick = { searchBarOpen = false; query = ""; searchResults = emptyList() }) {
-                            Icon(Icons.Default.Close, "Close search")
-                        }
-                    }
                     }
                     AnimatedVisibility(visible = !fullScreen, enter = fadeIn(tween(220)) + slideInVertically(tween(220)) { -it / 3 }, exit = fadeOut(tween(160)) + slideOutVertically(tween(160)) { -it / 3 }) {
                     Column {
@@ -482,7 +423,21 @@ fun QuietPdfApp() {
                     }
                     }
                     }
-                    val listState = rememberLazyListState(initialFirstVisibleItemIndex = page)
+                    if (searchResults.isNotEmpty() && !fullScreen) {
+                        Row(
+                            Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()).padding(horizontal = 10.dp, vertical = 2.dp),
+                            horizontalArrangement = Arrangement.spacedBy(6.dp),
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Text("Matches:", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                            searchResults.forEach { resultPage ->
+                                AssistChip(
+                                    onClick = { scope.launch { listState.animateScrollToItem(resultPage) } },
+                                    label = { Text("Page ${resultPage + 1}") }
+                                )
+                            }
+                        }
+                    }
                     LaunchedEffect(listState) {
                         snapshotFlow { listState.firstVisibleItemIndex }.collect { visiblePage ->
                             page = visiblePage.coerceIn(0, (pageCount - 1).coerceAtLeast(0))
@@ -563,31 +518,54 @@ fun QuietPdfApp() {
                             )
                         }
                     }
+                        if (pageCount > 1 && documentZoom <= 1.05f) {
+                            val scrubberColor = MaterialTheme.colorScheme.primary
+                            Column(
+                                Modifier.align(Alignment.CenterEnd).padding(end = 3.dp).width(38.dp),
+                                horizontalAlignment = Alignment.CenterHorizontally
+                            ) {
+                                Text(
+                                    "${page + 1}/${pageCount}",
+                                    style = MaterialTheme.typography.labelSmall,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                                )
+                                Canvas(
+                                    Modifier.fillMaxHeight(0.72f).width(34.dp)
+                                        .pointerInput(pageCount) {
+                                            detectTapGestures { tap ->
+                                                val fraction = ((tap.y - 8.dp.toPx()) / (size.height - 16.dp.toPx())).coerceIn(0f, 1f)
+                                                val target = (fraction * (pageCount - 1)).toInt().coerceIn(0, pageCount - 1)
+                                                page = target
+                                                scope.launch { listState.scrollToItem(target) }
+                                            }
+                                        }
+                                        .pointerInput(pageCount) {
+                                            detectDragGestures(
+                                                onDrag = { change, _ ->
+                                                    change.consume()
+                                                    val fraction = ((change.position.y - 8.dp.toPx()) / (size.height - 16.dp.toPx())).coerceIn(0f, 1f)
+                                                    val target = (fraction * (pageCount - 1)).toInt().coerceIn(0, pageCount - 1)
+                                                    if (target != page) {
+                                                        page = target
+                                                        scope.launch { listState.scrollToItem(target) }
+                                                    }
+                                                }
+                                            )
+                                        }
+                                ) {
+                                    val top = 8.dp.toPx()
+                                    val bottom = size.height - top
+                                    val x = size.width / 2f
+                                    drawLine(Color.LightGray.copy(alpha = 0.8f), Offset(x, top), Offset(x, bottom), strokeWidth = 3.dp.toPx())
+                                    val fraction = if (pageCount > 1) page.toFloat() / (pageCount - 1) else 0f
+                                    drawCircle(scrubberColor, radius = 7.dp.toPx(), center = Offset(x, top + fraction * (bottom - top)))
+                                }
+                            }
+                        }
                     }
                     AnimatedVisibility(visible = !fullScreen, enter = fadeIn(tween(220)) + slideInVertically(tween(220)) { it / 3 }, exit = fadeOut(tween(160)) + slideOutVertically(tween(160)) { it / 3 }) {
                     Column {
                     if (message.isNotBlank()) Text(message, Modifier.fillMaxWidth().padding(horizontal = 8.dp, vertical = 3.dp), color = MaterialTheme.colorScheme.primary, style = MaterialTheme.typography.bodySmall)
-                    Row(Modifier.fillMaxWidth().padding(horizontal = 8.dp, vertical = 4.dp), horizontalArrangement = Arrangement.SpaceBetween) {
-                        OutlinedButton(
-                            onClick = { currentUri = null; renderer?.close(); renderer = null; descriptor?.close(); descriptor = null },
-                            shape = MaterialTheme.shapes.large,
-                            contentPadding = PaddingValues(horizontal = 18.dp, vertical = 10.dp)
-                        ) {
-                            Icon(Icons.Default.LibraryBooks, null, Modifier.size(18.dp))
-                            Spacer(Modifier.width(8.dp))
-                            Text("Library")
-                        }
-                        FilledTonalButton(
-                            onClick = { exportLauncher.launch(currentName.substringBeforeLast('.', currentName) + "_annotated.pdf") },
-                            shape = MaterialTheme.shapes.large,
-                            contentPadding = PaddingValues(horizontal = 14.dp, vertical = 10.dp)
-                        ) {
-                            Icon(Icons.Default.SaveAlt, null, Modifier.size(18.dp))
-                            Spacer(Modifier.width(6.dp))
-                            Text("Save copy")
-                        }
-
-                    }
                     }
                     }
                 }
@@ -610,22 +588,50 @@ fun QuietPdfApp() {
     LaunchedEffect(searching) {
         if (searching && query.isNotBlank() && currentUri != null) {
             val uri = currentUri!!
-            val result = withContext(Dispatchers.IO) {
+            val term = query.trim().replace(Regex("\\s+"), " ")
+            val searchOutcome = withContext(Dispatchers.IO) {
                 runCatching {
-                    val temp = File(context.cacheDir, "search.pdf")
-                    context.contentResolver.openInputStream(uri)?.use { input -> FileOutputStream(temp).use { input.copyTo(it) } }
-                    PDDocument.load(temp).use { doc ->
-                        (0 until doc.numberOfPages).filter { index ->
-                            val stripper = PDFTextStripper().apply { startPage = index + 1; endPage = index + 1 }
-                            stripper.getText(doc).contains(query, ignoreCase = true)
+                    val temp = File.createTempFile("quiet_search_", ".pdf", context.cacheDir)
+                    try {
+                        context.contentResolver.openInputStream(uri)?.use { input ->
+                            FileOutputStream(temp).use { output -> input.copyTo(output) }
+                        } ?: error("Cannot read this PDF")
+                        PDDocument.load(temp).use { doc ->
+                            val matches = mutableListOf<Int>()
+                            for (index in 0 until doc.numberOfPages) {
+                                val stripper = PDFTextStripper().apply {
+                                    startPage = index + 1
+                                    endPage = index + 1
+                                    sortByPosition = true
+                                }
+                                val pageText = stripper.getText(doc).replace(Regex("\\s+"), " ")
+                                if (pageText.contains(term, ignoreCase = true)) matches.add(index)
+                            }
+                            matches
                         }
+                    } finally {
+                        temp.delete()
                     }
-                }.getOrDefault(emptyList())
+                }
             }
-            searchResults = result
-            message = if (result.isEmpty()) "No matches found" else "Found on pages: ${result.map { it + 1 }.joinToString()}"
+            searchOutcome.onSuccess { result ->
+                searchResults = result
+                if (result.isNotEmpty()) {
+                    page = result.first()
+                    listState.animateScrollToItem(result.first())
+                    message = "Found ${result.size} matching page(s). Select a page chip to jump to another match."
+                } else {
+                    message = "No text matches found. Scanned/image-only PDFs need OCR, which is not available yet."
+                }
+            }.onFailure { error ->
+                searchResults = emptyList()
+                message = "Search failed: ${error.message ?: "Unable to read PDF text"}"
+            }
             searching = false
-        } else if (searching) searching = false
+        } else if (searching) {
+            message = "Open a PDF and enter a search term."
+            searching = false
+        }
     }
 }
 
@@ -639,13 +645,26 @@ private fun PdfPageItem(
     var pageBitmap by remember(pageIndex,renderer){mutableStateOf<Bitmap?>(null)}
     var strokePoints by remember(pageIndex){mutableStateOf(listOf<Offset>())}
     var dragEnd by remember(pageIndex){mutableStateOf<Offset?>(null)}
-    val renderWidth = (1100f * documentZoom).toInt().coerceIn(1100, 3200)
+    var settledZoom by remember(pageIndex, renderer) { mutableFloatStateOf(1f) }
+    LaunchedEffect(documentZoom) {
+        delay(420)
+        settledZoom = documentZoom
+    }
+    val screenWidthPx = LocalContext.current.resources.displayMetrics.widthPixels
+    val renderWidth = (screenWidthPx * settledZoom * 1.15f).toInt().coerceIn(1400, 3000)
     LaunchedEffect(renderer,pageIndex,renderWidth){
-        delay(120)
-        pageBitmap=runCatching{renderMutex.withLock{renderer.openPage(pageIndex).use{pdfPage->
-            val w=renderWidth; val h=(w.toFloat()*pdfPage.height/pdfPage.width).toInt().coerceAtLeast(1)
-            Bitmap.createBitmap(w,h,Bitmap.Config.ARGB_8888).also{it.eraseColor(AndroidColor.WHITE);pdfPage.render(it,null,null,PdfRenderer.Page.RENDER_MODE_FOR_DISPLAY)}
-        }}}.getOrNull()
+        pageBitmap = runCatching {
+            renderMutex.withLock {
+                renderer.openPage(pageIndex).use { pdfPage ->
+                    val w = renderWidth
+                    val h = (w.toFloat() * pdfPage.height / pdfPage.width).toInt().coerceAtLeast(1)
+                    Bitmap.createBitmap(w,h,Bitmap.Config.RGB_565).also {
+                        it.eraseColor(AndroidColor.WHITE)
+                        pdfPage.render(it,null,null,PdfRenderer.Page.RENDER_MODE_FOR_DISPLAY)
+                    }
+                }
+            }
+        }.getOrNull()
     }
     pageBitmap?.let{bmp->
         Box(
