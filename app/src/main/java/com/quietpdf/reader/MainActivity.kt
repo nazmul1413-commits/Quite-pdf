@@ -43,6 +43,10 @@ import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.graphics.Path
 import androidx.compose.ui.graphics.StrokeCap
 import androidx.compose.ui.graphics.nativeCanvas
+import androidx.compose.foundation.gestures.detectTapGestures
+import androidx.compose.ui.graphics.Path
+import androidx.compose.ui.graphics.StrokeCap
+import androidx.compose.ui.graphics.nativeCanvas
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalView
@@ -60,6 +64,9 @@ import com.tom_roush.pdfbox.android.PDFBoxResourceLoader
 import com.tom_roush.pdfbox.pdmodel.PDDocument
 import com.tom_roush.pdfbox.pdmodel.PDPageContentStream
 import com.tom_roush.pdfbox.pdmodel.graphics.state.PDExtendedGraphicsState
+import com.tom_roush.pdfbox.pdmodel.font.PDType1Font
+import android.util.Base64
+import android.graphics.Paint as AndroidPaint
 import com.tom_roush.pdfbox.text.PDFTextStripper
 import java.io.File
 import java.io.FileOutputStream
@@ -223,17 +230,28 @@ fun QuietPdfApp() {
                                     val pdfPage = document.getPage(pageIndex)
                                     val bounds = pdfPage.mediaBox
                                     PDPageContentStream(document, pdfPage, PDPageContentStream.AppendMode.APPEND, true, true).use { stream ->
-                                        val alpha = PDExtendedGraphicsState().apply { nonStrokingAlphaConstant = 0.38f }
-                                        stream.setGraphicsStateParameters(alpha)
-                                        stream.setNonStrokingColor(255, 235, 59)
-                                        pageMarks.forEach { mark ->
-                                            val x = mark.left * bounds.width
-                                            val y = (1f - mark.bottom) * bounds.height
-                                            val width = (mark.right - mark.left) * bounds.width
-                                            val height = (mark.bottom - mark.top) * bounds.height
-                                            if (width > 0f && height > 0f) {
-                                                stream.addRect(x, y, width, height)
-                                                stream.fill()
+                                        pageMarks.forEach { item ->
+                                            val pts = item.points
+                                            if (pts.isEmpty()) return@forEach
+                                            val red=AndroidColor.red(item.color); val green=AndroidColor.green(item.color); val blue=AndroidColor.blue(item.color)
+                                            when(item.kind) {
+                                                "PEN", "HIGHLIGHTER" -> {
+                                                    if(item.kind=="HIGHLIGHTER") stream.setGraphicsStateParameters(PDExtendedGraphicsState().apply { strokingAlphaConstant=0.30f })
+                                                    stream.setStrokingColor(red,green,blue); stream.setLineWidth(item.width*bounds.width); stream.setLineCapStyle(1)
+                                                    stream.moveTo(pts[0].x*bounds.width,(1f-pts[0].y)*bounds.height)
+                                                    pts.drop(1).forEach { stream.lineTo(it.x*bounds.width,(1f-it.y)*bounds.height) }; stream.stroke()
+                                                }
+                                                "RECTANGLE" -> if(pts.size>=2) {
+                                                    val x1=pts[0].x*bounds.width; val x2=pts[1].x*bounds.width
+                                                    val y1=(1f-pts[0].y)*bounds.height; val y2=(1f-pts[1].y)*bounds.height
+                                                    stream.setStrokingColor(red,green,blue); stream.setLineWidth(item.width*bounds.width)
+                                                    stream.addRect(minOf(x1,x2),minOf(y1,y2),kotlin.math.abs(x2-x1),kotlin.math.abs(y2-y1)); stream.stroke()
+                                                }
+                                                "TEXT" -> {
+                                                    stream.beginText(); stream.setFont(PDType1Font.HELVETICA,12f); stream.setNonStrokingColor(red,green,blue)
+                                                    stream.newLineAtOffset(pts[0].x*bounds.width,(1f-pts[0].y)*bounds.height)
+                                                    stream.showText(item.text.filter { it.code in 32..255 }.take(500)); stream.endText()
+                                                }
                                             }
                                         }
                                     }
