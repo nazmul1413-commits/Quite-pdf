@@ -41,6 +41,8 @@ import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.asImageBitmap
+import androidx.compose.ui.graphics.graphicsLayer
+import androidx.compose.foundation.gestures.detectTransformGestures
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.graphics.Path
 import androidx.compose.ui.graphics.StrokeCap
@@ -318,10 +320,8 @@ fun QuietPdfApp() {
                     TopAppBar(
                     modifier = Modifier,
                     title = {
-                        Column {
-                            Text("Quiet PDF", fontWeight = FontWeight.SemiBold)
-                            if (currentUri != null) Text(currentName, style = MaterialTheme.typography.labelSmall, maxLines = 1)
-                        }
+                        if (currentUri != null) Text(currentName, fontWeight = FontWeight.Medium, maxLines = 1)
+                        else Text("Your library", fontWeight = FontWeight.SemiBold)
                     },
                     actions = {
                         IconButton(onClick = { searchBarOpen = !searchBarOpen; if (!searchBarOpen) query = "" }) {
@@ -542,6 +542,8 @@ private fun PdfPageItem(
     onErase: (Offset)->Unit, onTextTap: (Offset)->Unit, onTapPage: ()->Unit
 ) {
     var pageBitmap by remember(pageIndex,renderer){mutableStateOf<Bitmap?>(null)}
+    var zoom by remember(pageIndex,renderer){mutableFloatStateOf(1f)}
+    var pan by remember(pageIndex,renderer){mutableStateOf(Offset.Zero)}
     var strokePoints by remember(pageIndex){mutableStateOf(listOf<Offset>())}
     var dragEnd by remember(pageIndex){mutableStateOf<Offset?>(null)}
     LaunchedEffect(renderer,pageIndex){
@@ -551,7 +553,24 @@ private fun PdfPageItem(
         }}}.getOrNull()
     }
     pageBitmap?.let{bmp->
-        Box(Modifier.fillMaxWidth().clickable(enabled=!editMode){onTapPage()},contentAlignment=Alignment.TopCenter){
+        Box(
+            Modifier.fillMaxWidth()
+                .graphicsLayer {
+                    scaleX = zoom
+                    scaleY = zoom
+                    translationX = pan.x
+                    translationY = pan.y
+                }
+                .pointerInput(pageIndex) {
+                    detectTransformGestures { _, gesturePan, gestureZoom, _ ->
+                        val nextZoom = (zoom * gestureZoom).coerceIn(1f, 5f)
+                        zoom = nextZoom
+                        pan = if (nextZoom <= 1f) Offset.Zero else pan + gesturePan
+                    }
+                }
+                .clickable(enabled=!editMode){onTapPage()},
+            contentAlignment=Alignment.TopCenter
+        ){
             androidx.compose.foundation.Image(bitmap=bmp.asImageBitmap(),contentDescription="PDF page ${pageIndex+1}",modifier=Modifier.fillMaxWidth().aspectRatio(bmp.width.toFloat()/bmp.height.toFloat()),contentScale=ContentScale.FillBounds)
             Canvas(Modifier.fillMaxWidth().aspectRatio(bmp.width.toFloat()/bmp.height.toFloat()).pointerInput(editMode,activeTool,pageIndex){
                 if(editMode && activeTool=="TEXT") detectTapGestures{p->onTextTap(Offset((p.x/size.width).coerceIn(0f,1f),(p.y/size.height).coerceIn(0f,1f)))}
