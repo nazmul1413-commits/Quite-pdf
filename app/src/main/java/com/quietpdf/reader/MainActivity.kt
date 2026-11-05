@@ -42,6 +42,7 @@ import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.graphics.graphicsLayer
+import androidx.compose.ui.draw.clipToBounds
 import androidx.compose.foundation.gestures.awaitEachGesture
 import androidx.compose.foundation.gestures.awaitFirstDown
 import androidx.compose.ui.layout.ContentScale
@@ -59,6 +60,7 @@ import androidx.compose.ui.unit.dp
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import com.tom_roush.pdfbox.android.PDFBoxResourceLoader
@@ -115,6 +117,32 @@ fun QuietPdfApp() {
     var fullScreen by remember { mutableStateOf(false) }
     var documentZoom by remember { mutableFloatStateOf(1f) }
     var documentPan by remember { mutableStateOf(Offset.Zero) }
+    val latestDocumentZoom by rememberUpdatedState(documentZoom)
+    var annotationUndo by remember { mutableStateOf(listOf<List<Annotation>>()) }
+    var annotationRedo by remember { mutableStateOf(listOf<List<Annotation>>()) }
+
+    fun updateAnnotations(next: List<Annotation>) {
+        annotationUndo = annotationUndo + listOf(annotations)
+        annotationRedo = emptyList()
+        annotations = next
+        saveAnnotations()
+    }
+    fun undoAnnotation() {
+        if (annotationUndo.isNotEmpty()) {
+            annotationRedo = annotationRedo + listOf(annotations)
+            annotations = annotationUndo.last()
+            annotationUndo = annotationUndo.dropLast(1)
+            saveAnnotations()
+        }
+    }
+    fun redoAnnotation() {
+        if (annotationRedo.isNotEmpty()) {
+            annotationUndo = annotationUndo + listOf(annotations)
+            annotations = annotationRedo.last()
+            annotationRedo = annotationRedo.dropLast(1)
+            saveAnnotations()
+        }
+    }
     BackHandler(enabled = fullScreen) { fullScreen = false }
     var dragStart by remember { mutableStateOf<Offset?>(null) }
     var dragEnd by remember { mutableStateOf<Offset?>(null) }
@@ -148,6 +176,8 @@ fun QuietPdfApp() {
             currentName = name
             documentZoom = 1f
             documentPan = Offset.Zero
+            annotationUndo = emptyList()
+            annotationRedo = emptyList()
             fullScreen = true
             pageCount = r.pageCount
             page = prefs.getInt("page_${uri}", 0).coerceIn(0, (r.pageCount - 1).coerceAtLeast(0))
@@ -387,15 +417,31 @@ fun QuietPdfApp() {
             } else {
                 Column(Modifier.padding(padding).fillMaxSize()) {
                     AnimatedVisibility(visible = !fullScreen, enter = fadeIn(tween(220)) + slideInVertically(tween(220)) { -it / 3 }, exit = fadeOut(tween(160)) + slideOutVertically(tween(160)) { -it / 3 }) {
-                    if (!fullScreen) Row(Modifier.fillMaxWidth().padding(horizontal = 10.dp, vertical = 1.dp), verticalAlignment = Alignment.CenterVertically) {
-                        Text("Page ${page + 1} of $pageCount", modifier = Modifier.weight(1f), textAlign = androidx.compose.ui.text.style.TextAlign.Start)
+                    if (!fullScreen) Row(
+                        Modifier.fillMaxWidth().height(40.dp).padding(horizontal = 8.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.Start
+                    ) {
+                        IconButton(onClick = { editMode = !editMode; message = if (editMode) "Reading mode" else "Choose a tool and annotate the page" }, modifier = Modifier.size(38.dp)) {
+                            Icon(if (editMode) Icons.Default.Done else Icons.Default.Edit, contentDescription = if (editMode) "Finish annotating" else "Annotate")
+                        }
                         IconButton(onClick = {
-                            val key = "bookmarks_${currentUri}"
-                            val old = prefs.getString(key, "")!!.split(",").filter { it.isNotBlank() }.mapNotNull { it.toIntOrNull() }
-                            val updated = if (page in old) old - page else old + page
-                            prefs.edit().putString(key, updated.joinToString(",")).apply()
-                            message = if (page in old) "Bookmark removed" else "Page bookmarked"
-                        }) { Icon(Icons.Default.BookmarkAdd, "Toggle bookmark") }
+                            currentUri = null
+                            renderer?.close(); renderer = null
+                            descriptor?.close(); descriptor = null
+                            editMode = false
+                        }, modifier = Modifier.size(38.dp)) {
+                            Icon(Icons.Default.LibraryBooks, contentDescription = "Library")
+                        }
+                        if (editMode) {
+                            IconButton(onClick = { undoAnnotation() }, enabled = annotationUndo.isNotEmpty(), modifier = Modifier.size(38.dp)) {
+                                Icon(Icons.Default.Undo, contentDescription = "Undo annotation")
+                            }
+                            IconButton(onClick = { redoAnnotation() }, enabled = annotationRedo.isNotEmpty(), modifier = Modifier.size(38.dp)) {
+                                Icon(Icons.Default.Redo, contentDescription = "Redo annotation")
+                            }
+                        }
+                        Spacer(Modifier.weight(1f))
                         IconButton(onClick = {
                             currentUri?.let { uri ->
                                 val intent = Intent(Intent.ACTION_SEND).apply {
@@ -405,7 +451,7 @@ fun QuietPdfApp() {
                                 }
                                 context.startActivity(Intent.createChooser(intent, "Share PDF"))
                             }
-                        }) { Icon(Icons.Default.Share, "Share PDF") }
+                        }, modifier = Modifier.size(38.dp)) { Icon(Icons.Default.Share, contentDescription = "Share PDF") }
                     }
                     if (!fullScreen && searchBarOpen) Row(
                         Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 2.dp),
@@ -428,16 +474,7 @@ fun QuietPdfApp() {
                     }
                     AnimatedVisibility(visible = !fullScreen, enter = fadeIn(tween(220)) + slideInVertically(tween(220)) { -it / 3 }, exit = fadeOut(tween(160)) + slideOutVertically(tween(160)) { -it / 3 }) {
                     Column {
-                    Row(Modifier.fillMaxWidth().padding(horizontal=12.dp),verticalAlignment=Alignment.CenterVertically){
-                        OutlinedButton(onClick={editMode=!editMode;message=if(editMode) "Choose a tool and draw or tap on the page" else "Reading mode"}){
-                            Icon(if(editMode) Icons.Default.Done else Icons.Default.Edit,null); Spacer(Modifier.width(6.dp)); Text(if(editMode) "Done" else "Edit")
-                        }
-                        Spacer(Modifier.width(8.dp))
-                        TextButton(onClick={
-                            val key="bookmarks_${currentUri}"; val pages=prefs.getString(key,"")!!.split(",").filter{it.isNotBlank()}
-                            message=if(pages.isEmpty()) "No bookmarks yet" else "Bookmarked pages: ${pages.mapNotNull{it.toIntOrNull()}.sorted().joinToString{(it+1).toString()}}"
-                        }){Text("Bookmarks")}
-                    }
+
                     if(editMode) Row(Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()).padding(horizontal=8.dp),horizontalArrangement=Arrangement.spacedBy(6.dp)){
                         listOf("PEN" to "Pen","HIGHLIGHTER" to "Highlighter","RECTANGLE" to "Rectangle","TEXT" to "Text","ERASER" to "Eraser").forEach{(tool,label)->
                             FilterChip(selected=activeTool==tool,onClick={activeTool=tool},label={Text(label)})
@@ -454,9 +491,56 @@ fun QuietPdfApp() {
                             saveDocs()
                         }
                     }
+                    Box(
+                        modifier = Modifier.weight(1f).fillMaxWidth()
+                            .background(MaterialTheme.colorScheme.surfaceVariant)
+                            .clipToBounds()
+                            .graphicsLayer {
+                                scaleX = documentZoom
+                                scaleY = documentZoom
+                                translationX = documentPan.x
+                                translationY = documentPan.y
+                            }
+                            .pointerInput(Unit) {
+                                awaitEachGesture {
+                                    awaitFirstDown(requireUnconsumed = false)
+                                    var previousCentroid = Offset.Zero
+                                    var previousSpan = 0f
+                                    var trackingPinch = false
+                                    do {
+                                        val event = awaitPointerEvent()
+                                        val pressed = event.changes.filter { it.pressed }
+                                        if (pressed.size >= 2) {
+                                            val centroid = Offset(
+                                                pressed.map { it.position.x }.average().toFloat(),
+                                                pressed.map { it.position.y }.average().toFloat()
+                                            )
+                                            val span = pressed.map {
+                                                val dx = it.position.x - centroid.x
+                                                val dy = it.position.y - centroid.y
+                                                kotlin.math.sqrt(dx * dx + dy * dy)
+                                            }.average().toFloat()
+                                            if (trackingPinch && previousSpan > 0f) {
+                                                val nextZoom = (latestDocumentZoom * (span / previousSpan)).coerceIn(1f, 5f)
+                                                documentZoom = nextZoom
+                                                if (nextZoom <= 1f) documentPan = Offset.Zero
+                                                else documentPan += centroid - previousCentroid
+                                                event.changes.forEach { if (it.pressed) it.consume() }
+                                            }
+                                            previousCentroid = centroid
+                                            previousSpan = span
+                                            trackingPinch = true
+                                        } else {
+                                            trackingPinch = false
+                                            previousSpan = 0f
+                                        }
+                                    } while (event.changes.any { it.pressed })
+                                }
+                            }
+                    ) {
                     LazyColumn(
                         state = listState,
-                        modifier = Modifier.weight(1f).fillMaxWidth().background(MaterialTheme.colorScheme.surfaceVariant),
+                        modifier = Modifier.fillMaxSize(),
                         horizontalAlignment = Alignment.CenterHorizontally,
                         verticalArrangement = if (pageCount == 1) Arrangement.Center else Arrangement.Top,
                         contentPadding = PaddingValues(0.dp)
@@ -468,18 +552,11 @@ fun QuietPdfApp() {
                                 pageIndex = index,
                                 annotations = annotations.filter { it.page == index },
                                 documentZoom = documentZoom,
-                                documentPan = documentPan,
-                                onDocumentZoomChange = { next ->
-                                    documentZoom = next
-                                    if (next <= 1f) documentPan = Offset.Zero
-                                },
-                                onDocumentPanBy = { delta -> documentPan += delta },
                                 editMode = editMode,
                                 activeTool = activeTool,
-                                onAddAnnotation = { item -> annotations = annotations + item; saveAnnotations() },
+                                onAddAnnotation = { item -> updateAnnotations(annotations + item) },
                                 onErase = { point ->
-                                    annotations = annotations.filterNot { item -> item.page == index && item.points.any { candidate -> val dx=candidate.x-point.x; val dy=candidate.y-point.y; dx*dx+dy*dy < 0.002f } }
-                                    saveAnnotations()
+                                    updateAnnotations(annotations.filterNot { item -> item.page == index && item.points.any { candidate -> val dx=candidate.x-point.x; val dy=candidate.y-point.y; dx*dx+dy*dy < 0.002f } })
                                 },
                                 onTextTap = { point -> pendingText = index to point; textDraft = "" },
                                 onTapPage = { fullScreen = !fullScreen }
@@ -508,15 +585,7 @@ fun QuietPdfApp() {
                             Spacer(Modifier.width(6.dp))
                             Text("Save copy")
                         }
-                        FilledTonalButton(
-                            onClick = { annotations = emptyList(); saveAnnotations(); message = "All annotations cleared from this document" },
-                            shape = MaterialTheme.shapes.large,
-                            contentPadding = PaddingValues(horizontal = 16.dp, vertical = 10.dp)
-                        ) {
-                            Icon(Icons.Default.HighlightOff, null, Modifier.size(18.dp))
-                            Spacer(Modifier.width(8.dp))
-                            Text("Clear annotations")
-                        }
+
                     }
                     }
                     }
@@ -531,7 +600,7 @@ fun QuietPdfApp() {
         text = { OutlinedTextField(value=textDraft,onValueChange={textDraft=it},label={Text("Text")}) },
         confirmButton = { TextButton(onClick={
             val target = pendingText!!
-            if(textDraft.isNotBlank()){ annotations = annotations + Annotation(target.first,"TEXT",listOf(target.second),0xFF1565C0.toInt(),0.004f,textDraft); saveAnnotations() }
+            if(textDraft.isNotBlank()){ updateAnnotations(annotations + Annotation(target.first,"TEXT",listOf(target.second),0xFF1565C0.toInt(),0.004f,textDraft)) }
             pendingText = null
         }) { Text("Add") } },
         dismissButton = { TextButton(onClick={pendingText=null}) { Text("Cancel") } }
@@ -562,67 +631,24 @@ fun QuietPdfApp() {
 @Composable
 private fun PdfPageItem(
     renderer: PdfRenderer, renderMutex: Mutex, pageIndex: Int, annotations: List<Annotation>,
-    documentZoom: Float, documentPan: Offset,
-    onDocumentZoomChange: (Float) -> Unit, onDocumentPanBy: (Offset) -> Unit,
+    documentZoom: Float,
     editMode: Boolean, activeTool: String, onAddAnnotation: (Annotation)->Unit,
     onErase: (Offset)->Unit, onTextTap: (Offset)->Unit, onTapPage: ()->Unit
 ) {
     var pageBitmap by remember(pageIndex,renderer){mutableStateOf<Bitmap?>(null)}
-    val latestDocumentZoom by rememberUpdatedState(documentZoom)
     var strokePoints by remember(pageIndex){mutableStateOf(listOf<Offset>())}
     var dragEnd by remember(pageIndex){mutableStateOf<Offset?>(null)}
-    LaunchedEffect(renderer,pageIndex){
+    val renderWidth = (1100f * documentZoom).toInt().coerceIn(1100, 3200)
+    LaunchedEffect(renderer,pageIndex,renderWidth){
+        delay(120)
         pageBitmap=runCatching{renderMutex.withLock{renderer.openPage(pageIndex).use{pdfPage->
-            val w=1100; val h=(w.toFloat()*pdfPage.height/pdfPage.width).toInt().coerceAtLeast(1)
+            val w=renderWidth; val h=(w.toFloat()*pdfPage.height/pdfPage.width).toInt().coerceAtLeast(1)
             Bitmap.createBitmap(w,h,Bitmap.Config.ARGB_8888).also{it.eraseColor(AndroidColor.WHITE);pdfPage.render(it,null,null,PdfRenderer.Page.RENDER_MODE_FOR_DISPLAY)}
         }}}.getOrNull()
     }
     pageBitmap?.let{bmp->
         Box(
             Modifier.fillMaxWidth()
-                .graphicsLayer {
-                    scaleX = documentZoom
-                    scaleY = documentZoom
-                    translationX = documentPan.x
-                    translationY = documentPan.y
-                }
-                .pointerInput(pageIndex) {
-                    // Only handle two-finger gestures here. A one-finger drag must
-                    // remain available to LazyColumn for normal vertical scrolling.
-                    awaitEachGesture {
-                        awaitFirstDown(requireUnconsumed = false)
-                        var previousCentroid = Offset.Zero
-                        var previousSpan = 0f
-                        var trackingPinch = false
-                        do {
-                            val event = awaitPointerEvent()
-                            val pressed = event.changes.filter { it.pressed }
-                            if (pressed.size >= 2) {
-                                val centroid = Offset(
-                                    pressed.map { it.position.x }.average().toFloat(),
-                                    pressed.map { it.position.y }.average().toFloat()
-                                )
-                                val span = pressed.map {
-                                    val dx = it.position.x - centroid.x
-                                    val dy = it.position.y - centroid.y
-                                    kotlin.math.sqrt(dx * dx + dy * dy)
-                                }.average().toFloat()
-                                if (trackingPinch && previousSpan > 0f) {
-                                    val nextZoom = (latestDocumentZoom * (span / previousSpan)).coerceIn(1f, 5f)
-                                    onDocumentZoomChange(nextZoom)
-                                    if (nextZoom > 1f) onDocumentPanBy(centroid - previousCentroid)
-                                    event.changes.forEach { if (it.pressed) it.consume() }
-                                }
-                                previousCentroid = centroid
-                                previousSpan = span
-                                trackingPinch = true
-                            } else {
-                                trackingPinch = false
-                                previousSpan = 0f
-                            }
-                        } while (event.changes.any { it.pressed })
-                    }
-                }
                 .clickable(enabled=!editMode){onTapPage()},
             contentAlignment=Alignment.TopCenter
         ){
@@ -661,6 +687,12 @@ private fun PdfPageItem(
                     if(activeTool=="RECTANGLE"&&dragEnd!=null){val p=dragEnd!!;drawRect(Color(0xFF1565C0),Offset(minOf(strokePoints[0].x*size.width,p.x),minOf(strokePoints[0].y*size.height,p.y)),Size(kotlin.math.abs(p.x-strokePoints[0].x*size.width),kotlin.math.abs(p.y-strokePoints[0].y*size.height)),style=androidx.compose.ui.graphics.drawscope.Stroke(2.dp.toPx()))}
                     else drawPath(path,if(activeTool=="HIGHLIGHTER")Color(0x66FFEB3B) else Color(0xFF202124),style=androidx.compose.ui.graphics.drawscope.Stroke(if(activeTool=="HIGHLIGHTER")18.dp.toPx() else 3.dp.toPx(),cap=StrokeCap.Round))
                 }
+            Text(
+                text = "${pageIndex + 1}",
+                modifier = Modifier.align(Alignment.BottomCenter).padding(bottom = 7.dp),
+                color = Color(0xFF9E9E9E),
+                style = MaterialTheme.typography.labelSmall
+            )
             }
         }
     }?:Box(Modifier.fillMaxWidth().height(240.dp),contentAlignment=Alignment.Center){CircularProgressIndicator()}
