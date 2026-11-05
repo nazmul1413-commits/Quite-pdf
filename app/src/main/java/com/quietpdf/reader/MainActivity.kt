@@ -641,9 +641,9 @@ fun QuietPdfApp() {
                                 FileOutputStream(temp).use { output -> input.copyTo(output) }
                             } ?: error("Android could not read this PDF file.")
                             PDDocument.load(temp).use { doc ->
+                                val pageGlyphs = linkedMapOf<Int, MutableList<SearchGlyph>>()
+                                var activePage = 0
                                 val stripper = object : PDFTextStripper() {
-                                    var activePage = 0
-                                    val pageGlyphs = linkedMapOf<Int, MutableList<SearchGlyph>>()
                                     init {
                                         sortByPosition = true
                                         setShouldSeparateByBeads(false)
