@@ -34,6 +34,10 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalView
+import androidx.core.view.WindowCompat
+import androidx.core.view.WindowInsetsCompat
+import androidx.core.view.WindowInsetsControllerCompat
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import kotlinx.coroutines.Dispatchers
@@ -78,6 +82,7 @@ fun QuietPdfApp() {
     var marks by remember { mutableStateOf(listOf<Mark>()) }
     var drawing by remember { mutableStateOf(false) }
     var editMode by remember { mutableStateOf(false) }
+    var fullScreen by remember { mutableStateOf(false) }
     var dragStart by remember { mutableStateOf<Offset?>(null) }
     var dragEnd by remember { mutableStateOf<Offset?>(null) }
 
@@ -135,6 +140,21 @@ fun QuietPdfApp() {
     }
 
     LaunchedEffect(Unit) { loadDocs() }
+
+    val hostActivity = context as? ComponentActivity
+    val hostView = LocalView.current
+    LaunchedEffect(fullScreen) {
+        hostActivity?.window?.let { window ->
+            WindowCompat.setDecorFitsSystemWindows(window, !fullScreen)
+            val controller = WindowCompat.getInsetsController(window, hostView)
+            if (fullScreen) {
+                controller.systemBarsBehavior = WindowInsetsControllerCompat.BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE
+                controller.hide(WindowInsetsCompat.Type.systemBars())
+            } else {
+                controller.show(WindowInsetsCompat.Type.systemBars())
+            }
+        }
+    }
     
 
     val picker = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
@@ -178,7 +198,7 @@ fun QuietPdfApp() {
             )
         }
         Scaffold(
-            topBar = {
+            topBar = if (fullScreen) null else {
                 TopAppBar(
                     title = {
                         Column {
@@ -195,7 +215,7 @@ fun QuietPdfApp() {
                     }
                 )
             },
-            floatingActionButton = {
+            floatingActionButton = if (fullScreen || currentUri != null) null else {
                 FloatingActionButton(onClick = { picker.launch(arrayOf("application/pdf")) }) {
                     Icon(Icons.Default.Add, "Open PDF")
                 }
@@ -233,7 +253,7 @@ fun QuietPdfApp() {
                 }
             } else {
                 Column(Modifier.padding(padding).fillMaxSize()) {
-                    Row(Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 4.dp), verticalAlignment = Alignment.CenterVertically) {
+                    if (!fullScreen) Row(Modifier.fillMaxWidth().padding(horizontal = 10.dp, vertical = 1.dp), verticalAlignment = Alignment.CenterVertically) {
                         Text("Page ${page + 1} of $pageCount", modifier = Modifier.weight(1f), textAlign = androidx.compose.ui.text.style.TextAlign.Start)
                         IconButton(onClick = {
                             val key = "bookmarks_${currentUri}"
@@ -253,7 +273,7 @@ fun QuietPdfApp() {
                             }
                         }) { Icon(Icons.Default.Share, "Share PDF") }
                     }
-                    Row(Modifier.fillMaxWidth().padding(horizontal = 12.dp), verticalAlignment = Alignment.CenterVertically) {
+                    if (!fullScreen) Row(Modifier.fillMaxWidth().padding(horizontal = 10.dp), verticalAlignment = Alignment.CenterVertically) {
                         OutlinedTextField(query, { query = it }, Modifier.weight(1f), singleLine = true, placeholder = { Text("Search in this PDF") })
                         IconButton(onClick = { searching = true; searchResults = emptyList() }) { Icon(Icons.Default.Search, "Search text") }
                     }
@@ -291,12 +311,13 @@ fun QuietPdfApp() {
                                 pageIndex = index,
                                 marks = marks.filter { it.page == index },
                                 editMode = editMode,
-                                onAddMark = { mark -> marks = marks + mark; saveMarks() }
+                                onAddMark = { mark -> marks = marks + mark; saveMarks() },
+                                onTapPage = { fullScreen = !fullScreen }
                             )
                         }
                     }
-                    if (message.isNotBlank()) Text(message, Modifier.fillMaxWidth().padding(8.dp), color = MaterialTheme.colorScheme.primary, style = MaterialTheme.typography.bodySmall)
-                    Row(Modifier.fillMaxWidth().padding(8.dp), horizontalArrangement = Arrangement.SpaceBetween) {
+                    if (!fullScreen && message.isNotBlank()) Text(message, Modifier.fillMaxWidth().padding(8.dp), color = MaterialTheme.colorScheme.primary, style = MaterialTheme.typography.bodySmall)
+                    if (!fullScreen) Row(Modifier.fillMaxWidth().padding(8.dp), horizontalArrangement = Arrangement.SpaceBetween) {
                         OutlinedButton(
                             onClick = { currentUri = null; renderer?.close(); renderer = null; descriptor?.close(); descriptor = null },
                             shape = MaterialTheme.shapes.large,
@@ -349,7 +370,8 @@ private fun PdfPageItem(
     pageIndex: Int,
     marks: List<Mark>,
     editMode: Boolean,
-    onAddMark: (Mark) -> Unit
+    onAddMark: (Mark) -> Unit,
+    onTapPage: () -> Unit
 ) {
     var pageBitmap by remember(pageIndex, renderer) { mutableStateOf<Bitmap?>(null) }
     var dragStart by remember(pageIndex) { mutableStateOf<Offset?>(null) }
@@ -374,7 +396,7 @@ private fun PdfPageItem(
                 androidx.compose.foundation.Image(
                     bitmap = bmp.asImageBitmap(),
                     contentDescription = "PDF page ${pageIndex + 1}",
-                    modifier = Modifier.fillMaxWidth()
+                    modifier = Modifier.fillMaxWidth().clickable(enabled = !editMode) { onTapPage() }
                 )
                 Canvas(
                     Modifier.fillMaxWidth()
