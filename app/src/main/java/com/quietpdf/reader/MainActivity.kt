@@ -568,6 +568,7 @@ private fun PdfPageItem(
     onErase: (Offset)->Unit, onTextTap: (Offset)->Unit, onTapPage: ()->Unit
 ) {
     var pageBitmap by remember(pageIndex,renderer){mutableStateOf<Bitmap?>(null)}
+    val latestDocumentZoom by rememberUpdatedState(documentZoom)
     var strokePoints by remember(pageIndex){mutableStateOf(listOf<Offset>())}
     var dragEnd by remember(pageIndex){mutableStateOf<Offset?>(null)}
     LaunchedEffect(renderer,pageIndex){
@@ -585,7 +586,7 @@ private fun PdfPageItem(
                     translationX = documentPan.x
                     translationY = documentPan.y
                 }
-                .pointerInput(pageIndex, documentZoom) {
+                .pointerInput(pageIndex) {
                     // Only handle two-finger gestures here. A one-finger drag must
                     // remain available to LazyColumn for normal vertical scrolling.
                     awaitEachGesture {
@@ -607,7 +608,7 @@ private fun PdfPageItem(
                                     kotlin.math.sqrt(dx * dx + dy * dy)
                                 }.average().toFloat()
                                 if (trackingPinch && previousSpan > 0f) {
-                                    val nextZoom = (documentZoom * (span / previousSpan)).coerceIn(1f, 5f)
+                                    val nextZoom = (latestDocumentZoom * (span / previousSpan)).coerceIn(1f, 5f)
                                     onDocumentZoomChange(nextZoom)
                                     if (nextZoom > 1f) onDocumentPanBy(centroid - previousCentroid)
                                     event.changes.forEach { if (it.pressed) it.consume() }
