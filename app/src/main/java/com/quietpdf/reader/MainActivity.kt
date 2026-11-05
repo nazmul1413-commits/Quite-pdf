@@ -49,8 +49,13 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import com.tom_roush.pdfbox.android.PDFBoxResourceLoader
 import com.tom_roush.pdfbox.pdmodel.PDDocument
+import com.tom_roush.pdfbox.pdmodel.PDPageContentStream
+import com.tom_roush.pdfbox.pdmodel.graphics.state.PDExtendedGraphicsState
 import com.tom_roush.pdfbox.text.PDFTextStripper
 import java.io.File
 import java.io.FileOutputStream
@@ -70,6 +75,8 @@ class MainActivity : ComponentActivity() {
 @Composable
 fun QuietPdfApp() {
     val context = LocalContext.current
+    val scope = rememberCoroutineScope()
+    val renderMutex = remember { Mutex() }
     val prefs = remember { context.getSharedPreferences("quiet_pdf", 0) }
     var dark by remember { mutableStateOf(prefs.getBoolean("dark", false)) }
     var settingsOpen by remember { mutableStateOf(false) }
@@ -153,15 +160,20 @@ fun QuietPdfApp() {
     val hostView = LocalView.current
     LaunchedEffect(fullScreen) {
         hostActivity?.window?.let { window ->
-            WindowCompat.setDecorFitsSystemWindows(window, false)
-            window.statusBarColor = AndroidColor.TRANSPARENT
-            window.navigationBarColor = AndroidColor.TRANSPARENT
+            // Restore normal insets outside immersive mode to prevent the oversized top strip.
+            WindowCompat.setDecorFitsSystemWindows(window, !fullScreen)
             val controller = WindowCompat.getInsetsController(window, hostView)
             if (fullScreen) {
+                window.statusBarColor = AndroidColor.TRANSPARENT
+                window.navigationBarColor = AndroidColor.TRANSPARENT
                 controller.systemBarsBehavior = WindowInsetsControllerCompat.BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE
                 controller.hide(WindowInsetsCompat.Type.systemBars())
             } else {
                 controller.show(WindowInsetsCompat.Type.systemBars())
+                window.statusBarColor = if (dark || night) AndroidColor.BLACK else AndroidColor.WHITE
+                window.navigationBarColor = if (dark || night) AndroidColor.BLACK else AndroidColor.WHITE
+                controller.isAppearanceLightStatusBars = !(dark || night)
+                controller.isAppearanceLightNavigationBars = !(dark || night)
             }
         }
     }
@@ -171,6 +183,51 @@ fun QuietPdfApp() {
         if (uri != null) {
             runCatching { context.contentResolver.takePersistableUriPermission(uri, android.content.Intent.FLAG_GRANT_READ_URI_PERMISSION) }
             openPdf(uri, uri.lastPathSegment?.substringAfterLast('/') ?: "PDF document")
+        }
+    }
+
+    // Export annotations into a separate PDF copy; the original remains untouched.
+    val exportLauncher = rememberLauncherForActivityResult(ActivityResultContracts.CreateDocument("application/pdf")) { destination ->
+        val source = currentUri
+        val annotations = marks.toList()
+        if (destination != null && source != null) {
+            scope.launch {
+                val exported = withContext(Dispatchers.IO) {
+                    runCatching {
+                        val temp = File(context.cacheDir, "quiet_pdf_export_source.pdf")
+                        context.contentResolver.openInputStream(source)?.use { input ->
+                            FileOutputStream(temp).use { output -> input.copyTo(output) }
+                        } ?: error("Cannot read the original PDF")
+                        PDDocument.load(temp).use { document ->
+                            annotations.groupBy { it.page }.forEach { (pageIndex, pageMarks) ->
+                                if (pageIndex in 0 until document.numberOfPages) {
+                                    val pdfPage = document.getPage(pageIndex)
+                                    val bounds = pdfPage.mediaBox
+                                    PDPageContentStream(document, pdfPage, PDPageContentStream.AppendMode.APPEND, true, true).use { stream ->
+                                        val alpha = PDExtendedGraphicsState().apply { nonStrokingAlphaConstant = 0.38f }
+                                        stream.setGraphicsStateParameters(alpha)
+                                        stream.setNonStrokingColor(255, 235, 59)
+                                        pageMarks.forEach { mark ->
+                                            val x = mark.left * bounds.width
+                                            val y = (1f - mark.bottom) * bounds.height
+                                            val width = (mark.right - mark.left) * bounds.width
+                                            val height = (mark.bottom - mark.top) * bounds.height
+                                            if (width > 0f && height > 0f) {
+                                                stream.addRect(x, y, width, height)
+                                                stream.fill()
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                            context.contentResolver.openOutputStream(destination)?.use { output ->
+                                document.save(output)
+                            } ?: error("Cannot create the destination PDF")
+                        }
+                    }.isSuccess
+                }
+                message = if (exported) "Annotated copy saved. Your original PDF is unchanged." else "Could not export the PDF. Please try again."
+            }
         }
     }
 
@@ -325,6 +382,7 @@ fun QuietPdfApp() {
                         items(pageCount) { index ->
                             PdfPageItem(
                                 renderer = renderer!!,
+                                renderMutex = renderMutex,
                                 pageIndex = index,
                                 marks = marks.filter { it.page == index },
                                 editMode = editMode,
@@ -345,6 +403,15 @@ fun QuietPdfApp() {
                             Icon(Icons.Default.LibraryBooks, null, Modifier.size(18.dp))
                             Spacer(Modifier.width(8.dp))
                             Text("Library")
+                        }
+                        FilledTonalButton(
+                            onClick = { exportLauncher.launch(currentName.substringBeforeLast('.', currentName) + "_annotated.pdf") },
+                            shape = MaterialTheme.shapes.large,
+                            contentPadding = PaddingValues(horizontal = 14.dp, vertical = 10.dp)
+                        ) {
+                            Icon(Icons.Default.SaveAlt, null, Modifier.size(18.dp))
+                            Spacer(Modifier.width(6.dp))
+                            Text("Save copy")
                         }
                         FilledTonalButton(
                             onClick = { marks = marks.filterNot { it.page == page }; saveMarks(); message = "Highlights cleared on this page" },
@@ -388,6 +455,7 @@ fun QuietPdfApp() {
 @Composable
 private fun PdfPageItem(
     renderer: PdfRenderer,
+    renderMutex: Mutex,
     pageIndex: Int,
     marks: List<Mark>,
     editMode: Boolean,
@@ -400,12 +468,14 @@ private fun PdfPageItem(
 
     LaunchedEffect(renderer, pageIndex) {
         pageBitmap = runCatching {
-            renderer.openPage(pageIndex).use { pdfPage ->
-                val width = 1200
-                val height = (width.toFloat() * pdfPage.height / pdfPage.width).toInt().coerceAtLeast(1)
-                Bitmap.createBitmap(width, height, Bitmap.Config.ARGB_8888).also { bmp ->
-                    bmp.eraseColor(AndroidColor.WHITE)
-                    pdfPage.render(bmp, null, null, PdfRenderer.Page.RENDER_MODE_FOR_DISPLAY)
+            renderMutex.withLock {
+                renderer.openPage(pageIndex).use { pdfPage ->
+                    val width = 1600
+                    val height = (width.toFloat() * pdfPage.height / pdfPage.width).toInt().coerceAtLeast(1)
+                    Bitmap.createBitmap(width, height, Bitmap.Config.ARGB_8888).also { bmp ->
+                        bmp.eraseColor(AndroidColor.WHITE)
+                        pdfPage.render(bmp, null, null, PdfRenderer.Page.RENDER_MODE_FOR_DISPLAY)
+                    }
                 }
             }
         }.getOrNull()
