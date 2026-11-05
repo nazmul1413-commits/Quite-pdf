@@ -45,6 +45,7 @@ import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.graphics.graphicsLayer
+import androidx.compose.ui.graphics.TransformOrigin
 import androidx.compose.ui.draw.clipToBounds
 import androidx.compose.foundation.gestures.awaitEachGesture
 import androidx.compose.foundation.gestures.awaitFirstDown
@@ -485,6 +486,9 @@ fun QuietPdfApp() {
                             .background(if (dark || night) Color(0xFF202020) else Color(0xFFF7F7F7))
                             .clipToBounds()
                             .graphicsLayer {
+                                // Use a top-left transform origin because gesture centroids are
+                                // reported in this Box's local coordinates.
+                                transformOrigin = TransformOrigin(0f, 0f)
                                 scaleX = documentZoom
                                 scaleY = documentZoom
                                 translationX = documentPan.x
@@ -531,14 +535,37 @@ fun QuietPdfApp() {
                                 onSelectText = { point ->
                                     val uri = currentUri
                                     if (uri != null) scope.launch {
-                                        val word = withContext(Dispatchers.IO) { findWordAt(context, uri, index, point) }
-                                        if (word.isNotBlank()) selectedText = word else message = "No selectable text at that position. Scanned PDFs need OCR."
+                                        val extracted = withContext(Dispatchers.IO) {
+                                            val word = findWordAt(context, uri, index, point)
+                                            if (word.isNotBlank()) word else extractPageText(context, uri, index)
+                                        }
+                                        if (extracted.isNotBlank()) {
+                                            selectedText = extracted
+                                        } else {
+                                            message = "No selectable text on this page. Scanned PDFs need OCR."
+                                        }
                                     }
                                 },
                                 onTapPage = { fullScreen = !fullScreen }
                             )
                         }
                     }
+                        Surface(
+                            modifier = Modifier.align(Alignment.TopEnd).padding(8.dp),
+                            color = Color.Black.copy(alpha = 0.58f),
+                            shape = MaterialTheme.shapes.large
+                        ) {
+                            IconButton(
+                                onClick = { fullScreen = !fullScreen },
+                                modifier = Modifier.size(40.dp)
+                            ) {
+                                Icon(
+                                    if (fullScreen) Icons.Default.FullscreenExit else Icons.Default.Fullscreen,
+                                    contentDescription = if (fullScreen) "Exit fullscreen" else "Enter fullscreen",
+                                    tint = Color.White
+                                )
+                            }
+                        }
                         if (pageCount > 1 && documentZoom <= 1.05f) {
                             val scrubberColor = MaterialTheme.colorScheme.primary
                             Column(
@@ -732,6 +759,27 @@ fun QuietPdfApp() {
                 searching = false
             }
         }
+    }
+}
+
+private fun extractPageText(context: android.content.Context, uri: Uri, pageIndex: Int): String {
+    val temp = File.createTempFile("quiet_page_text_", ".pdf", context.cacheDir)
+    try {
+        context.contentResolver.openInputStream(uri)?.use { input ->
+            FileOutputStream(temp).use { output -> input.copyTo(output) }
+        } ?: return ""
+        PDDocument.load(temp).use { doc ->
+            if (pageIndex !in 0 until doc.numberOfPages) return ""
+            return PDFTextStripper().apply {
+                startPage = pageIndex + 1
+                endPage = pageIndex + 1
+                sortByPosition = true
+            }.getText(doc).trim()
+        }
+    } catch (_: Exception) {
+        return ""
+    } finally {
+        temp.delete()
     }
 }
 
