@@ -44,10 +44,6 @@ import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.graphics.Path
 import androidx.compose.ui.graphics.StrokeCap
 import androidx.compose.ui.graphics.nativeCanvas
-import androidx.compose.foundation.gestures.detectTapGestures
-import androidx.compose.ui.graphics.Path
-import androidx.compose.ui.graphics.StrokeCap
-import androidx.compose.ui.graphics.nativeCanvas
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalView
@@ -71,9 +67,6 @@ import android.graphics.Paint as AndroidPaint
 import com.tom_roush.pdfbox.text.PDFTextStripper
 import java.io.File
 import java.io.FileOutputStream
-import android.graphics.Paint as AndroidPaint
-import android.util.Base64
-import com.tom_roush.pdfbox.pdmodel.font.PDType1Font
 
 data class DocItem(val uri: String, val name: String, val lastPage: Int = 0)
 data class Annotation(val page: Int, val kind: String, val points: List<Offset>, val color: Int = 0xFFFFD600.toInt(), val width: Float = 3f, val text: String = "")
@@ -418,6 +411,7 @@ fun QuietPdfApp() {
                         }
                     }
                     }
+                    }
                     val listState = rememberLazyListState(initialFirstVisibleItemIndex = page)
                     LaunchedEffect(listState) {
                         snapshotFlow { listState.firstVisibleItemIndex }.collect { visiblePage ->
@@ -443,7 +437,7 @@ fun QuietPdfApp() {
                                 activeTool = activeTool,
                                 onAddAnnotation = { item -> annotations = annotations + item; saveAnnotations() },
                                 onErase = { point ->
-                                    annotations = annotations.filterNot { item -> item.page == index && item.points.any { val dx=it.x-point.x; val dy=it.y-point.y; dx*dx+dy*dy < 0.002f } }
+                                    annotations = annotations.filterNot { item -> item.page == index && item.points.any { candidate -> val dx=candidate.x-point.x; val dy=candidate.y-point.y; dx*dx+dy*dy < 0.002f } }
                                     saveAnnotations()
                                 },
                                 onTextTap = { point -> pendingText = index to point; textDraft = "" },
