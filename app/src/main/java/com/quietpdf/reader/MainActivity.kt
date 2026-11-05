@@ -41,6 +41,7 @@ import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.asImageBitmap
+import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.graphics.Path
 import androidx.compose.ui.graphics.StrokeCap
 import androidx.compose.ui.graphics.nativeCanvas
@@ -108,7 +109,7 @@ fun QuietPdfApp() {
     var textDraft by remember { mutableStateOf("") }
     var drawing by remember { mutableStateOf(false) }
     var editMode by remember { mutableStateOf(false) }
-    var fullScreen by remember { mutableStateOf(false) }
+    var fullScreen by remember { mutableStateOf(true) }
     BackHandler(enabled = fullScreen) { fullScreen = false }
     var dragStart by remember { mutableStateOf<Offset?>(null) }
     var dragEnd by remember { mutableStateOf<Offset?>(null) }
@@ -140,6 +141,7 @@ fun QuietPdfApp() {
             renderer = r
             currentUri = uri
             currentName = name
+            fullScreen = true
             pageCount = r.pageCount
             page = prefs.getInt("page_${uri}", 0).coerceIn(0, (r.pageCount - 1).coerceAtLeast(0))
             val savedAnnotations = prefs.getString("annotations_${uri}", null)
@@ -195,7 +197,7 @@ fun QuietPdfApp() {
                 window.statusBarColor = AndroidColor.TRANSPARENT
                 window.navigationBarColor = AndroidColor.TRANSPARENT
                 controller.systemBarsBehavior = WindowInsetsControllerCompat.BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE
-                controller.hide(WindowInsetsCompat.Type.systemBars())
+                controller.hide(WindowInsetsCompat.Type.statusBars())
             } else {
                 controller.show(WindowInsetsCompat.Type.systemBars())
                 window.statusBarColor = if (dark || night) AndroidColor.BLACK else AndroidColor.WHITE
@@ -544,13 +546,13 @@ private fun PdfPageItem(
     var dragEnd by remember(pageIndex){mutableStateOf<Offset?>(null)}
     LaunchedEffect(renderer,pageIndex){
         pageBitmap=runCatching{renderMutex.withLock{renderer.openPage(pageIndex).use{pdfPage->
-            val w=1100; val h=(w.toFloat()*pdfPage.height/pdfPage.width).toInt().coerceAtLeast(1)
+            val w=1500; val h=(w.toFloat()*pdfPage.height/pdfPage.width).toInt().coerceAtLeast(1)
             Bitmap.createBitmap(w,h,Bitmap.Config.ARGB_8888).also{it.eraseColor(AndroidColor.WHITE);pdfPage.render(it,null,null,PdfRenderer.Page.RENDER_MODE_FOR_DISPLAY)}
         }}}.getOrNull()
     }
     pageBitmap?.let{bmp->
         Box(Modifier.fillMaxWidth().clickable(enabled=!editMode){onTapPage()},contentAlignment=Alignment.TopCenter){
-            androidx.compose.foundation.Image(bitmap=bmp.asImageBitmap(),contentDescription="PDF page ${pageIndex+1}",modifier=Modifier.fillMaxWidth())
+            androidx.compose.foundation.Image(bitmap=bmp.asImageBitmap(),contentDescription="PDF page ${pageIndex+1}",modifier=Modifier.fillMaxWidth().aspectRatio(bmp.width.toFloat()/bmp.height.toFloat()),contentScale=ContentScale.FillBounds)
             Canvas(Modifier.fillMaxWidth().aspectRatio(bmp.width.toFloat()/bmp.height.toFloat()).pointerInput(editMode,activeTool,pageIndex){
                 if(editMode && activeTool=="TEXT") detectTapGestures{p->onTextTap(Offset((p.x/size.width).coerceIn(0f,1f),(p.y/size.height).coerceIn(0f,1f)))}
                 else if(editMode) detectDragGestures(
