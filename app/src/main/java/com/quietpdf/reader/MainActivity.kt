@@ -643,8 +643,8 @@ fun QuietPdfApp() {
                                     stripper.startPage = index + 1
                                     stripper.endPage = index + 1
                                     val extracted = stripper.getText(doc)
-                                        .replace('\\u00A0', ' ')
-                                        .replace(Regex("[\\\\t\\\\r\\\\n\\\\u000C]+"), " ")
+                                        .replace('\u00A0', ' ')
+                                        .replace(Regex("[\\t\\r\\n\\u000C]+"), " ")
                                         .replace(Regex(" +"), " ")
                                     if (extracted.contains(term, ignoreCase = true)) matches.add(index)
                                 }
