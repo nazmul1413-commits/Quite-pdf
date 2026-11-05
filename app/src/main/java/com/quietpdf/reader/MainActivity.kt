@@ -652,14 +652,14 @@ private fun PdfPageItem(
         settledZoom = documentZoom
     }
     val screenWidthPx = LocalContext.current.resources.displayMetrics.widthPixels
-    val renderWidth = (screenWidthPx * settledZoom * 1.15f).toInt().coerceIn(1400, 3000)
+    val renderWidth = (screenWidthPx * settledZoom * 1.15f).toInt().coerceIn(1400, 2800)
     LaunchedEffect(renderer,pageIndex,renderWidth){
         pageBitmap = runCatching {
             renderMutex.withLock {
                 renderer.openPage(pageIndex).use { pdfPage ->
                     val w = renderWidth
                     val h = (w.toFloat() * pdfPage.height / pdfPage.width).toInt().coerceAtLeast(1)
-                    Bitmap.createBitmap(w,h,Bitmap.Config.RGB_565).also {
+                    Bitmap.createBitmap(w,h,Bitmap.Config.ARGB_8888).also {
                         it.eraseColor(AndroidColor.WHITE)
                         pdfPage.render(it,null,null,PdfRenderer.Page.RENDER_MODE_FOR_DISPLAY)
                     }
