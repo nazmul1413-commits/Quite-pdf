@@ -91,6 +91,7 @@ fun QuietPdfApp() {
     var query by remember { mutableStateOf("") }
     var searchResults by remember { mutableStateOf(listOf<Int>()) }
     var searching by remember { mutableStateOf(false) }
+    var searchBarOpen by remember { mutableStateOf(false) }
     var message by remember { mutableStateOf("") }
     var docs by remember { mutableStateOf(listOf<DocItem>()) }
     var marks by remember { mutableStateOf(listOf<Mark>()) }
@@ -268,7 +269,7 @@ fun QuietPdfApp() {
             topBar = {
                 AnimatedVisibility(visible = !fullScreen, enter = fadeIn(tween(220)) + slideInVertically(tween(220)) { -it / 3 }, exit = fadeOut(tween(160)) + slideOutVertically(tween(160)) { -it / 3 }) {
                     TopAppBar(
-                    modifier = Modifier.height(54.dp),
+                    modifier = Modifier,
                     title = {
                         Column {
                             Text("Quiet PDF", fontWeight = FontWeight.SemiBold)
@@ -276,11 +277,10 @@ fun QuietPdfApp() {
                         }
                     },
                     actions = {
-                        IconButton(onClick = { settingsOpen = true }) { Icon(Icons.Default.Settings, "Settings") }
-                        IconButton(onClick = { night = !night }) { Icon(Icons.Default.DarkMode, "Night reading") }
-                        IconButton(onClick = { dark = !dark; prefs.edit().putBoolean("dark", dark).apply() }) {
-                            Icon(Icons.Default.Contrast, "Toggle theme")
+                        IconButton(onClick = { searchBarOpen = !searchBarOpen; if (!searchBarOpen) query = "" }) {
+                            Icon(Icons.Default.Search, "Search in PDF")
                         }
+                        IconButton(onClick = { settingsOpen = true }) { Icon(Icons.Default.Settings, "Settings") }
                     }
                     )
                 }
@@ -344,9 +344,23 @@ fun QuietPdfApp() {
                             }
                         }) { Icon(Icons.Default.Share, "Share PDF") }
                     }
-                    if (!fullScreen) Row(Modifier.fillMaxWidth().padding(horizontal = 10.dp), verticalAlignment = Alignment.CenterVertically) {
-                        OutlinedTextField(query, { query = it }, Modifier.weight(1f), singleLine = true, placeholder = { Text("Search in this PDF") })
-                        IconButton(onClick = { searching = true; searchResults = emptyList() }) { Icon(Icons.Default.Search, "Search text") }
+                    if (!fullScreen && searchBarOpen) Row(
+                        Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 2.dp),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        OutlinedTextField(
+                            value = query,
+                            onValueChange = { query = it },
+                            modifier = Modifier.weight(1f),
+                            singleLine = true,
+                            placeholder = { Text("Search in this PDF") }
+                        )
+                        IconButton(onClick = { searchResults = emptyList(); searching = true }) {
+                            Icon(Icons.Default.ArrowForward, "Run search")
+                        }
+                        IconButton(onClick = { searchBarOpen = false; query = ""; searchResults = emptyList() }) {
+                            Icon(Icons.Default.Close, "Close search")
+                        }
                     }
                     }
                     AnimatedVisibility(visible = !fullScreen, enter = fadeIn(tween(220)) + slideInVertically(tween(220)) { -it / 3 }, exit = fadeOut(tween(160)) + slideOutVertically(tween(160)) { -it / 3 }) {
@@ -414,13 +428,13 @@ fun QuietPdfApp() {
                             Text("Save copy")
                         }
                         FilledTonalButton(
-                            onClick = { marks = marks.filterNot { it.page == page }; saveMarks(); message = "Highlights cleared on this page" },
+                            onClick = { marks = emptyList(); saveMarks(); message = "All annotations cleared from this document" },
                             shape = MaterialTheme.shapes.large,
                             contentPadding = PaddingValues(horizontal = 16.dp, vertical = 10.dp)
                         ) {
                             Icon(Icons.Default.HighlightOff, null, Modifier.size(18.dp))
                             Spacer(Modifier.width(8.dp))
-                            Text("Clear highlights")
+                            Text("Clear annotations")
                         }
                     }
                     }
@@ -470,7 +484,8 @@ private fun PdfPageItem(
         pageBitmap = runCatching {
             renderMutex.withLock {
                 renderer.openPage(pageIndex).use { pdfPage ->
-                    val width = 1600
+                    // Moderate bitmap size reduces memory pressure and scroll-time decoding.
+                    val width = 1100
                     val height = (width.toFloat() * pdfPage.height / pdfPage.width).toInt().coerceAtLeast(1)
                     Bitmap.createBitmap(width, height, Bitmap.Config.ARGB_8888).also { bmp ->
                         bmp.eraseColor(AndroidColor.WHITE)
