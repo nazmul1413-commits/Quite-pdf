@@ -513,77 +513,56 @@ fun QuietPdfApp() {
 
 @Composable
 private fun PdfPageItem(
-    renderer: PdfRenderer,
-    renderMutex: Mutex,
-    pageIndex: Int,
-    marks: List<Mark>,
-    editMode: Boolean,
-    onAddMark: (Mark) -> Unit,
-    onTapPage: () -> Unit
+    renderer: PdfRenderer, renderMutex: Mutex, pageIndex: Int, annotations: List<Annotation>,
+    editMode: Boolean, activeTool: String, onAddAnnotation: (Annotation)->Unit,
+    onErase: (Offset)->Unit, onTextTap: (Offset)->Unit, onTapPage: ()->Unit
 ) {
-    var pageBitmap by remember(pageIndex, renderer) { mutableStateOf<Bitmap?>(null) }
-    var dragStart by remember(pageIndex) { mutableStateOf<Offset?>(null) }
-    var dragEnd by remember(pageIndex) { mutableStateOf<Offset?>(null) }
-
-    LaunchedEffect(renderer, pageIndex) {
-        pageBitmap = runCatching {
-            renderMutex.withLock {
-                renderer.openPage(pageIndex).use { pdfPage ->
-                    // Moderate bitmap size reduces memory pressure and scroll-time decoding.
-                    val width = 1100
-                    val height = (width.toFloat() * pdfPage.height / pdfPage.width).toInt().coerceAtLeast(1)
-                    Bitmap.createBitmap(width, height, Bitmap.Config.ARGB_8888).also { bmp ->
-                        bmp.eraseColor(AndroidColor.WHITE)
-                        pdfPage.render(bmp, null, null, PdfRenderer.Page.RENDER_MODE_FOR_DISPLAY)
-                    }
-                }
-            }
-        }.getOrNull()
+    var pageBitmap by remember(pageIndex,renderer){mutableStateOf<Bitmap?>(null)}
+    var strokePoints by remember(pageIndex){mutableStateOf(listOf<Offset>())}
+    var dragEnd by remember(pageIndex){mutableStateOf<Offset?>(null)}
+    LaunchedEffect(renderer,pageIndex){
+        pageBitmap=runCatching{renderMutex.withLock{renderer.openPage(pageIndex).use{pdfPage->
+            val w=1100; val h=(w.toFloat()*pdfPage.height/pdfPage.width).toInt().coerceAtLeast(1)
+            Bitmap.createBitmap(w,h,Bitmap.Config.ARGB_8888).also{it.eraseColor(AndroidColor.WHITE);pdfPage.render(it,null,null,PdfRenderer.Page.RENDER_MODE_FOR_DISPLAY)}
+        }}}.getOrNull()
     }
-
-    pageBitmap?.let { bmp ->
-        Box(Modifier.fillMaxWidth().clickable(enabled = !editMode) { onTapPage() }, contentAlignment = Alignment.TopCenter) {
-                androidx.compose.foundation.Image(
-                    bitmap = bmp.asImageBitmap(),
-                    contentDescription = "PDF page ${pageIndex + 1}",
-                    modifier = Modifier.fillMaxWidth()
+    pageBitmap?.let{bmp->
+        Box(Modifier.fillMaxWidth().clickable(enabled=!editMode){onTapPage()},contentAlignment=Alignment.TopCenter){
+            androidx.compose.foundation.Image(bitmap=bmp.asImageBitmap(),contentDescription="PDF page ${pageIndex+1}",modifier=Modifier.fillMaxWidth())
+            Canvas(Modifier.fillMaxWidth().aspectRatio(bmp.width.toFloat()/bmp.height.toFloat()).pointerInput(editMode,activeTool,pageIndex){
+                if(editMode && activeTool=="TEXT") detectTapGestures{p->onTextTap(Offset((p.x/size.width).coerceIn(0f,1f),(p.y/size.height).coerceIn(0f,1f)))}
+                else if(editMode) detectDragGestures(
+                    onDragStart={p->strokePoints=listOf(Offset((p.x/size.width).coerceIn(0f,1f),(p.y/size.height).coerceIn(0f,1f)));dragEnd=p},
+                    onDrag={change,_->
+                        dragEnd=change.position
+                        val p=Offset((change.position.x/size.width).coerceIn(0f,1f),(change.position.y/size.height).coerceIn(0f,1f))
+                        if(activeTool=="PEN"||activeTool=="HIGHLIGHTER")strokePoints=strokePoints+p
+                        if(activeTool=="ERASER")onErase(p)
+                    },
+                    onDragEnd={
+                        if((activeTool=="PEN"||activeTool=="HIGHLIGHTER")&&strokePoints.isNotEmpty()) onAddAnnotation(Annotation(pageIndex,activeTool,strokePoints,if(activeTool=="PEN")0xFF202124.toInt() else 0xFFFFD600.toInt(),if(activeTool=="PEN")0.0025f else 0.018f))
+                        if(activeTool=="RECTANGLE"&&strokePoints.isNotEmpty()&&dragEnd!=null){val p=dragEnd!!;onAddAnnotation(Annotation(pageIndex,"RECTANGLE",listOf(strokePoints.first(),Offset((p.x/size.width).coerceIn(0f,1f),(p.y/size.height).coerceIn(0f,1f))),0xFF1565C0.toInt(),0.0025f))}
+                        strokePoints=emptyList();dragEnd=null
+                    }
                 )
-                Canvas(
-                    Modifier.fillMaxWidth()
-                        .aspectRatio(bmp.width.toFloat() / bmp.height.toFloat())
-                        .pointerInput(editMode, pageIndex) {
-                            if (editMode) detectDragGestures(
-                                onDragStart = { dragStart = it; dragEnd = it },
-                                onDrag = { change, _ -> dragEnd = change.position },
-                                onDragEnd = {
-                                    val a = dragStart
-                                    val b = dragEnd
-                                    if (a != null && b != null && kotlin.math.abs(a.x - b.x) > 8 && kotlin.math.abs(a.y - b.y) > 8) {
-                                        onAddMark(Mark(pageIndex,
-                                            (minOf(a.x, b.x) / size.width).coerceIn(0f, 1f),
-                                            (minOf(a.y, b.y) / size.height).coerceIn(0f, 1f),
-                                            (maxOf(a.x, b.x) / size.width).coerceIn(0f, 1f),
-                                            (maxOf(a.y, b.y) / size.height).coerceIn(0f, 1f)))
-                                    }
-                                    dragStart = null
-                                    dragEnd = null
-                                }
-                            )
+            }){
+                annotations.forEach{item->val pts=item.points
+                    if(pts.isNotEmpty()){
+                        val path=Path().apply{moveTo(pts[0].x*size.width,pts[0].y*size.height);pts.drop(1).forEach{lineTo(it.x*size.width,it.y*size.height)}}
+                        when(item.kind){
+                            "PEN"->drawPath(path,Color(item.color),style=androidx.compose.ui.graphics.drawscope.Stroke(item.width*size.width,cap=StrokeCap.Round))
+                            "HIGHLIGHTER"->drawPath(path,Color(item.color).copy(alpha=0.30f),style=androidx.compose.ui.graphics.drawscope.Stroke(item.width*size.width,cap=StrokeCap.Round))
+                            "RECTANGLE"->if(pts.size>=2)drawRect(Color(item.color),Offset(minOf(pts[0].x,pts[1].x)*size.width,minOf(pts[0].y,pts[1].y)*size.height),Size(kotlin.math.abs(pts[1].x-pts[0].x)*size.width,kotlin.math.abs(pts[1].y-pts[0].y)*size.height),style=androidx.compose.ui.graphics.drawscope.Stroke(item.width*size.width))
+                            "TEXT"->drawContext.canvas.nativeCanvas.drawText(item.text,pts[0].x*size.width,pts[0].y*size.height,AndroidPaint().apply{color=item.color;textSize=16f*density;isAntiAlias=true})
                         }
-                ) {
-                    marks.forEach { mark ->
-                        drawRect(Color(0x66FFEB3B), Offset(mark.left * size.width, mark.top * size.height),
-                            Size((mark.right - mark.left) * size.width, (mark.bottom - mark.top) * size.height))
-                    }
-                    val a = dragStart
-                    val b = dragEnd
-                    if (editMode && a != null && b != null) {
-                        drawRect(Color(0x66FFEB3B), Offset(minOf(a.x, b.x), minOf(a.y, b.y)),
-                            Size(kotlin.math.abs(b.x - a.x), kotlin.math.abs(b.y - a.y)))
                     }
                 }
+                if(editMode&&strokePoints.isNotEmpty()&&activeTool!="ERASER"){
+                    val path=Path().apply{moveTo(strokePoints[0].x*size.width,strokePoints[0].y*size.height);strokePoints.drop(1).forEach{lineTo(it.x*size.width,it.y*size.height)}}
+                    if(activeTool=="RECTANGLE"&&dragEnd!=null){val p=dragEnd!!;drawRect(Color(0xFF1565C0),Offset(minOf(strokePoints[0].x*size.width,p.x),minOf(strokePoints[0].y*size.height,p.y)),Size(kotlin.math.abs(p.x-strokePoints[0].x*size.width),kotlin.math.abs(p.y-strokePoints[0].y*size.height)),style=androidx.compose.ui.graphics.drawscope.Stroke(2.dp.toPx()))}
+                    else drawPath(path,if(activeTool=="HIGHLIGHTER")Color(0x66FFEB3B) else Color(0xFF202124),style=androidx.compose.ui.graphics.drawscope.Stroke(if(activeTool=="HIGHLIGHTER")18.dp.toPx() else 3.dp.toPx(),cap=StrokeCap.Round))
+                }
             }
-    } ?: Box(Modifier.fillMaxWidth().height(240.dp), contentAlignment = Alignment.Center) {
-        CircularProgressIndicator()
-    }
+        }
+    }?:Box(Modifier.fillMaxWidth().height(240.dp),contentAlignment=Alignment.Center){CircularProgressIndicator()}
 }
