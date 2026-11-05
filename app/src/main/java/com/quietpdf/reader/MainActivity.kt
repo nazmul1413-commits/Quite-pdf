@@ -723,7 +723,7 @@ private fun PdfPageItem(
                     onDrag={change,_->
                         dragEnd=change.position
                         val p=Offset((change.position.x/size.width).coerceIn(0f,1f),(change.position.y/size.height).coerceIn(0f,1f))
-                        if(activeTool=="PEN"||activeTool=="HIGHLIGHTER")strokePoints=strokePoints+p
+                        if(activeTool=="PEN"||activeTool=="HIGHLIGHTER"||activeTool=="UNDERLINE")strokePoints=strokePoints+p
                         if(activeTool=="ERASER")onErase(p)
                     },
                     onDragEnd={
