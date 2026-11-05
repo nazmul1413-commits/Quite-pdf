@@ -81,6 +81,8 @@ import java.io.FileOutputStream
 
 data class DocItem(val uri: String, val name: String, val lastPage: Int = 0)
 data class Annotation(val page: Int, val kind: String, val points: List<Offset>, val color: Int = 0xFFFFD600.toInt(), val width: Float = 3f, val text: String = "")
+data class SearchHighlight(val page: Int, val left: Float, val top: Float, val right: Float, val bottom: Float)
+private data class SearchGlyph(val char: Char, val x: Float, val y: Float, val width: Float, val height: Float)
 
 class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -109,6 +111,7 @@ fun QuietPdfApp() {
     var bitmap by remember { mutableStateOf<Bitmap?>(null) }
     var query by remember { mutableStateOf("") }
     var searchResults by remember { mutableStateOf(listOf<Int>()) }
+    var searchHighlights by remember { mutableStateOf(listOf<SearchHighlight>()) }
     var searching by remember { mutableStateOf(false) }
     var searchBarOpen by remember { mutableStateOf(false) }
     var message by remember { mutableStateOf("") }
@@ -325,7 +328,7 @@ fun QuietPdfApp() {
                             if (searchBarOpen) {
                                 OutlinedTextField(
                                     value = query,
-                                    onValueChange = { query = it; searchResults = emptyList() },
+                                    onValueChange = { query = it; searchResults = emptyList(); searchHighlights = emptyList() },
                                     modifier = Modifier.width(190.dp).height(48.dp),
                                     singleLine = true,
                                     textStyle = MaterialTheme.typography.bodySmall,
@@ -395,9 +398,6 @@ fun QuietPdfApp() {
                         verticalAlignment = Alignment.CenterVertically,
                         horizontalArrangement = Arrangement.Start
                     ) {
-                        IconButton(onClick = { searchBarOpen = true }, modifier = Modifier.size(38.dp)) {
-                            Icon(Icons.Default.Search, contentDescription = "Search in PDF")
-                        }
                         IconButton(onClick = { editMode = !editMode; message = if (editMode) "Reading mode" else "Choose a tool and annotate the page" }, modifier = Modifier.size(38.dp)) {
                             Icon(if (editMode) Icons.Default.Done else Icons.Default.Edit, contentDescription = if (editMode) "Finish annotating" else "Annotate")
                         }
@@ -438,9 +438,9 @@ fun QuietPdfApp() {
                             listOf("PEN" to "Pen","HIGHLIGHTER" to "Highlight","UNDERLINE" to "Underline","RECTANGLE" to "Rectangle","TEXT" to "Text","ERASER" to "Eraser").forEach{(tool,label)->
                                 FilterChip(selected=activeTool==tool,onClick={activeTool=tool},label={Text(label)})
                             }
-                            if(activeTool=="HIGHLIGHTER" || activeTool=="UNDERLINE" || activeTool=="PEN") {
+                            if(activeTool=="HIGHLIGHTER" || activeTool=="UNDERLINE" || activeTool=="PEN" || activeTool=="RECTANGLE") {
                                 HorizontalDivider(Modifier.height(24.dp).width(1.dp), color=MaterialTheme.colorScheme.outlineVariant)
-                                listOf(0xFFFFEB3B.toInt(),0xFFFF9800.toInt(),0xFF4CAF50.toInt(),0xFF2196F3.toInt(),0xFFE91E63.toInt(),0xFF202124.toInt()).forEach { swatch ->
+                                listOf(0xFFFFEB3B.toInt(),0xFFFF9800.toInt(),0xFF4CAF50.toInt(),0xFF2196F3.toInt(),0xFFE91E63.toInt(),0xFF9C27B0.toInt(),0xFF202124.toInt(),0xFFFFFFFF.toInt()).forEach { swatch ->
                                     Surface(
                                         modifier=Modifier.size(28.dp).clickable { annotationColor=swatch },
                                         shape=MaterialTheme.shapes.small,
@@ -487,35 +487,15 @@ fun QuietPdfApp() {
                                 translationY = documentPan.y
                             }
                             .pointerInput(Unit) {
-                                // Only a two-finger gesture controls zoom. One-finger
-                                // drags are left entirely to LazyColumn for page scrolling.
-                                awaitEachGesture {
-                                    awaitFirstDown(requireUnconsumed = false)
-                                    do {
-                                        val event = awaitPointerEvent()
-                                        val pressed = event.changes.filter { it.pressed }
-                                        if (pressed.size >= 2) {
-                                            val oldCenter = Offset(
-                                                pressed.map { it.previousPosition.x }.average().toFloat(),
-                                                pressed.map { it.previousPosition.y }.average().toFloat()
-                                            )
-                                            val newCenter = Offset(
-                                                pressed.map { it.position.x }.average().toFloat(),
-                                                pressed.map { it.position.y }.average().toFloat()
-                                            )
-                                            val oldDistance = pressed.map {
-                                                (it.previousPosition - oldCenter).getDistance()
-                                            }.average().toFloat()
-                                            val newDistance = pressed.map {
-                                                (it.position - newCenter).getDistance()
-                                            }.average().toFloat()
-                                            if (oldDistance > 0f && newDistance > 0f) {
-                                                documentZoom = (documentZoom * (newDistance / oldDistance)).coerceIn(1f, 8f)
-                                                documentPan = Offset.Zero
-                                            }
-                                            event.changes.forEach { it.consume() }
-                                        }
-                                    } while (event.changes.any { it.pressed })
+                                detectTransformGestures(panZoomLock = false) { centroid, pan, zoomChange, _ ->
+                                    val oldScale = documentZoom
+                                    val newScale = (oldScale * zoomChange).coerceIn(1f, 8f)
+                                    val appliedScale = newScale / oldScale
+                                    // Keep the content point under the fingers stationary
+                                    // while scaling; include two-finger translation as well.
+                                    documentPan = if (newScale <= 1f) Offset.Zero else
+                                        (documentPan - centroid) * appliedScale + centroid + pan
+                                    documentZoom = newScale
                                 }
                             }
                     ) {
@@ -534,6 +514,7 @@ fun QuietPdfApp() {
                                 renderWidth = (context.resources.displayMetrics.widthPixels * 1.8f).toInt().coerceIn(1600, 2400),
                                 pageIndex = index,
                                 annotations = annotations.filter { it.page == index },
+                                searchHighlights = searchHighlights.filter { it.page == index },
                                 documentZoom = documentZoom,
                                 editMode = editMode,
                                 activeTool = activeTool,
@@ -626,8 +607,7 @@ fun QuietPdfApp() {
                 val outcome = withContext(Dispatchers.IO) {
                     runCatching {
                         val matches = ArrayList<Int>()
-                        // Use PDFBox consistently across Android versions. This searches
-                        // the document text layer; scanned/image-only PDFs require OCR.
+                        val highlights = ArrayList<SearchHighlight>()
                         val uri = currentUri ?: error("The PDF is no longer open.")
                         val temp = File.createTempFile("quiet_search_", ".pdf", context.cacheDir)
                         try {
@@ -635,27 +615,82 @@ fun QuietPdfApp() {
                                 FileOutputStream(temp).use { output -> input.copyTo(output) }
                             } ?: error("Android could not read this PDF file.")
                             PDDocument.load(temp).use { doc ->
-                                val stripper = PDFTextStripper().apply {
-                                    sortByPosition = true
-                                    setShouldSeparateByBeads(false)
+                                val stripper = object : PDFTextStripper() {
+                                    var activePage = 0
+                                    val pageGlyphs = linkedMapOf<Int, MutableList<SearchGlyph>>()
+                                    init {
+                                        sortByPosition = true
+                                        setShouldSeparateByBeads(false)
+                                    }
+                                    override fun processPage(page: com.tom_roush.pdfbox.pdmodel.PDPage) {
+                                        activePage = currentPageNo
+                                        pageGlyphs.getOrPut(activePage) { mutableListOf() }
+                                        super.processPage(page)
+                                    }
+                                    override fun writeString(text: String, textPositions: MutableList<com.tom_roush.pdfbox.text.TextPosition>) {
+                                        val target = pageGlyphs.getOrPut(activePage) { mutableListOf() }
+                                        textPositions.forEach { pos ->
+                                            val glyphText = pos.unicode ?: ""
+                                            glyphText.forEach { ch ->
+                                                target.add(
+                                                    SearchGlyph(
+                                                        ch,
+                                                        pos.xDirAdj,
+                                                        (pos.yDirAdj - pos.heightDir).coerceAtLeast(0f),
+                                                        pos.widthDirAdj.coerceAtLeast(0.1f),
+                                                        pos.heightDir.coerceAtLeast(0.1f)
+                                                    )
+                                                )
+                                            }
+                                        }
+                                        super.writeString(text, textPositions)
+                                    }
                                 }
-                                for (index in 0 until doc.numberOfPages) {
-                                    stripper.startPage = index + 1
-                                    stripper.endPage = index + 1
-                                    val extracted = stripper.getText(doc)
-                                        .replace('\u00A0', ' ')
-                                        .replace(Regex("[\\t\\r\\n\\u000C]+"), " ")
-                                        .replace(Regex(" +"), " ")
-                                    if (extracted.contains(term, ignoreCase = true)) matches.add(index)
+                                stripper.getText(doc)
+                                val needle = term.lowercase()
+                                pageGlyphs.forEach { (pageNumber, glyphs) ->
+                                    val pageText = glyphs.joinToString("") { it.char.toString() }
+                                    val foundRects = mutableListOf<SearchHighlight>()
+                                    var from = 0
+                                    while (from <= pageText.length - needle.length) {
+                                        val at = pageText.lowercase().indexOf(needle, from)
+                                        if (at < 0) break
+                                        val selected = glyphs.subList(at, (at + needle.length).coerceAtMost(glyphs.size))
+                                            .filterNot { it.char.isWhitespace() }
+                                        if (selected.isNotEmpty()) {
+                                            val left = selected.minOf { it.x }
+                                            val top = selected.minOf { it.y }
+                                            val right = selected.maxOf { it.x + it.width }
+                                            val bottom = selected.maxOf { it.y + it.height }
+                                            val media = doc.getPage(pageNumber - 1).mediaBox
+                                            foundRects.add(
+                                                SearchHighlight(
+                                                    pageNumber - 1,
+                                                    (left / media.width).coerceIn(0f, 1f),
+                                                    (top / media.height).coerceIn(0f, 1f),
+                                                    (right / media.width).coerceIn(0f, 1f),
+                                                    (bottom / media.height).coerceIn(0f, 1f)
+                                                )
+                                            )
+                                        }
+                                        from = at + needle.length
+                                    }
+                                    if (foundRects.isNotEmpty()) {
+                                        matches.add(pageNumber - 1)
+                                        highlights.addAll(foundRects)
+                                    }
                                 }
                             }
                         } finally {
                             temp.delete()
                         }
+                        Pair(matches, highlights)
                         matches
                     }
                 }
-                outcome.onSuccess { matches ->
+                outcome.onSuccess { result ->
+                    val matches = result.first
+                    searchHighlights = result.second
                     searchResults = matches
                     if (matches.isNotEmpty()) {
                         page = matches.first()
@@ -666,6 +701,7 @@ fun QuietPdfApp() {
                     }
                 }.onFailure { error ->
                     searchResults = emptyList()
+                    searchHighlights = emptyList()
                     message = "Search error: ${error.message ?: error.javaClass.simpleName}"
                 }
                 searching = false
@@ -677,7 +713,7 @@ fun QuietPdfApp() {
 @Composable
 private fun PdfPageItem(
     renderer: PdfRenderer, renderMutex: Mutex, bitmapCache: LruCache<Int, Bitmap>, renderWidth: Int,
-    pageIndex: Int, annotations: List<Annotation>,
+    pageIndex: Int, annotations: List<Annotation>, searchHighlights: List<SearchHighlight>,
     documentZoom: Float,
     editMode: Boolean, activeTool: String, annotationColor: Int, onAddAnnotation: (Annotation)->Unit,
     onErase: (Offset)->Unit, onTextTap: (Offset)->Unit, onTapPage: ()->Unit
@@ -730,11 +766,18 @@ private fun PdfPageItem(
                     onDragEnd={
                         if((activeTool=="PEN"||activeTool=="HIGHLIGHTER")&&strokePoints.isNotEmpty()) onAddAnnotation(Annotation(pageIndex,activeTool,strokePoints,annotationColor,if(activeTool=="PEN")0.0025f else 0.018f))
                         if(activeTool=="UNDERLINE"&&strokePoints.size>=2) onAddAnnotation(Annotation(pageIndex,"UNDERLINE",listOf(strokePoints.first(),strokePoints.last()),annotationColor,0.0035f))
-                        if(activeTool=="RECTANGLE"&&strokePoints.isNotEmpty()&&dragEnd!=null){val p=dragEnd!!;onAddAnnotation(Annotation(pageIndex,"RECTANGLE",listOf(strokePoints.first(),Offset((p.x/size.width).coerceIn(0f,1f),(p.y/size.height).coerceIn(0f,1f))),0xFF1565C0.toInt(),0.0025f))}
+                        if(activeTool=="RECTANGLE"&&strokePoints.isNotEmpty()&&dragEnd!=null){val p=dragEnd!!;onAddAnnotation(Annotation(pageIndex,"RECTANGLE",listOf(strokePoints.first(),Offset((p.x/size.width).coerceIn(0f,1f),(p.y/size.height).coerceIn(0f,1f))),annotationColor,0.0025f))}
                         strokePoints=emptyList();dragEnd=null
                     }
                 )
             }){
+                searchHighlights.forEach { hit ->
+                    drawRect(
+                        Color(0xFFFFD54F).copy(alpha = 0.48f),
+                        Offset(hit.left * size.width, hit.top * size.height),
+                        Size((hit.right - hit.left) * size.width, (hit.bottom - hit.top) * size.height)
+                    )
+                }
                 annotations.forEach{item->val pts=item.points
                     if(pts.isNotEmpty()){
                         val path=Path().apply{moveTo(pts[0].x*size.width,pts[0].y*size.height);pts.drop(1).forEach{lineTo(it.x*size.width,it.y*size.height)}}
@@ -750,7 +793,7 @@ private fun PdfPageItem(
                 }
                 if(editMode&&strokePoints.isNotEmpty()&&activeTool!="ERASER"){
                     val path=Path().apply{moveTo(strokePoints[0].x*size.width,strokePoints[0].y*size.height);strokePoints.drop(1).forEach{lineTo(it.x*size.width,it.y*size.height)}}
-                    if(activeTool=="RECTANGLE"&&dragEnd!=null){val p=dragEnd!!;drawRect(Color(0xFF1565C0),Offset(minOf(strokePoints[0].x*size.width,p.x),minOf(strokePoints[0].y*size.height,p.y)),Size(kotlin.math.abs(p.x-strokePoints[0].x*size.width),kotlin.math.abs(p.y-strokePoints[0].y*size.height)),style=androidx.compose.ui.graphics.drawscope.Stroke(2.dp.toPx()))}
+                    if(activeTool=="RECTANGLE"&&dragEnd!=null){val p=dragEnd!!;drawRect(Color(annotationColor),Offset(minOf(strokePoints[0].x*size.width,p.x),minOf(strokePoints[0].y*size.height,p.y)),Size(kotlin.math.abs(p.x-strokePoints[0].x*size.width),kotlin.math.abs(p.y-strokePoints[0].y*size.height)),style=androidx.compose.ui.graphics.drawscope.Stroke(2.dp.toPx()))}
                     else if(activeTool=="UNDERLINE" && strokePoints.size>=2) drawLine(Color(annotationColor),Offset(strokePoints.first().x*size.width,strokePoints.first().y*size.height),Offset(strokePoints.last().x*size.width,strokePoints.last().y*size.height),strokeWidth=2.dp.toPx(),cap=StrokeCap.Round)
                     else drawPath(path,if(activeTool=="HIGHLIGHTER")Color(annotationColor).copy(alpha=0.30f) else Color(annotationColor),style=androidx.compose.ui.graphics.drawscope.Stroke(if(activeTool=="HIGHLIGHTER")18.dp.toPx() else 3.dp.toPx(),cap=StrokeCap.Round))
                 }
