@@ -12,6 +12,12 @@ import androidx.activity.compose.BackHandler
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.fadeIn
+import androidx.compose.animation.fadeOut
+import androidx.compose.animation.slideInVertically
+import androidx.compose.animation.slideOutVertically
+import androidx.compose.animation.core.tween
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
@@ -147,7 +153,9 @@ fun QuietPdfApp() {
     val hostView = LocalView.current
     LaunchedEffect(fullScreen) {
         hostActivity?.window?.let { window ->
-            WindowCompat.setDecorFitsSystemWindows(window, !fullScreen)
+            WindowCompat.setDecorFitsSystemWindows(window, false)
+            window.statusBarColor = AndroidColor.TRANSPARENT
+            window.navigationBarColor = AndroidColor.TRANSPARENT
             val controller = WindowCompat.getInsetsController(window, hostView)
             if (fullScreen) {
                 controller.systemBarsBehavior = WindowInsetsControllerCompat.BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE
@@ -201,7 +209,9 @@ fun QuietPdfApp() {
         }
         Scaffold(
             topBar = {
-                if (!fullScreen) TopAppBar(
+                AnimatedVisibility(visible = !fullScreen, enter = fadeIn(tween(220)) + slideInVertically(tween(220)) { -it / 3 }, exit = fadeOut(tween(160)) + slideOutVertically(tween(160)) { -it / 3 }) {
+                    TopAppBar(
+                    modifier = Modifier.height(54.dp),
                     title = {
                         Column {
                             Text("Quiet PDF", fontWeight = FontWeight.SemiBold)
@@ -215,7 +225,8 @@ fun QuietPdfApp() {
                             Icon(Icons.Default.Contrast, "Toggle theme")
                         }
                     }
-                )
+                    )
+                }
             },
             floatingActionButton = {
                 if (!fullScreen && currentUri == null) FloatingActionButton(onClick = { picker.launch(arrayOf("application/pdf")) }) {
@@ -255,6 +266,7 @@ fun QuietPdfApp() {
                 }
             } else {
                 Column(Modifier.padding(padding).fillMaxSize()) {
+                    AnimatedVisibility(visible = !fullScreen, enter = fadeIn(tween(220)) + slideInVertically(tween(220)) { -it / 3 }, exit = fadeOut(tween(160)) + slideOutVertically(tween(160)) { -it / 3 }) {
                     if (!fullScreen) Row(Modifier.fillMaxWidth().padding(horizontal = 10.dp, vertical = 1.dp), verticalAlignment = Alignment.CenterVertically) {
                         Text("Page ${page + 1} of $pageCount", modifier = Modifier.weight(1f), textAlign = androidx.compose.ui.text.style.TextAlign.Start)
                         IconButton(onClick = {
@@ -279,6 +291,8 @@ fun QuietPdfApp() {
                         OutlinedTextField(query, { query = it }, Modifier.weight(1f), singleLine = true, placeholder = { Text("Search in this PDF") })
                         IconButton(onClick = { searching = true; searchResults = emptyList() }) { Icon(Icons.Default.Search, "Search text") }
                     }
+                    }
+                    AnimatedVisibility(visible = !fullScreen, enter = fadeIn(tween(220)) + slideInVertically(tween(220)) { -it / 3 }, exit = fadeOut(tween(160)) + slideOutVertically(tween(160)) { -it / 3 }) {
                     Row(Modifier.fillMaxWidth().padding(horizontal = 12.dp), verticalAlignment = Alignment.CenterVertically) {
                         OutlinedButton(onClick = { editMode = !editMode; drawing = editMode; message = if (editMode) "Edit mode: drag over a page to add a highlight" else "Reading mode" }) {
                             Icon(if (editMode) Icons.Default.Done else Icons.Default.Edit, null)
@@ -291,6 +305,7 @@ fun QuietPdfApp() {
                             val pages = prefs.getString(key, "")!!.split(",").filter { it.isNotBlank() }
                             message = if (pages.isEmpty()) "No bookmarks yet" else "Bookmarked pages: ${pages.mapNotNull { it.toIntOrNull() }.sorted().joinToString { (it + 1).toString() }}"
                         }) { Text("Bookmarks") }
+                    }
                     }
                     val listState = rememberLazyListState(initialFirstVisibleItemIndex = page)
                     LaunchedEffect(listState) {
@@ -305,7 +320,7 @@ fun QuietPdfApp() {
                         state = listState,
                         modifier = Modifier.weight(1f).fillMaxWidth().background(MaterialTheme.colorScheme.surfaceVariant),
                         horizontalAlignment = Alignment.CenterHorizontally,
-                        contentPadding = PaddingValues(vertical = 8.dp)
+                        contentPadding = PaddingValues(0.dp)
                     ) {
                         items(pageCount) { index ->
                             PdfPageItem(
@@ -318,8 +333,10 @@ fun QuietPdfApp() {
                             )
                         }
                     }
-                    if (!fullScreen && message.isNotBlank()) Text(message, Modifier.fillMaxWidth().padding(8.dp), color = MaterialTheme.colorScheme.primary, style = MaterialTheme.typography.bodySmall)
-                    if (!fullScreen) Row(Modifier.fillMaxWidth().padding(8.dp), horizontalArrangement = Arrangement.SpaceBetween) {
+                    AnimatedVisibility(visible = !fullScreen, enter = fadeIn(tween(220)) + slideInVertically(tween(220)) { it / 3 }, exit = fadeOut(tween(160)) + slideOutVertically(tween(160)) { it / 3 }) {
+                    Column {
+                    if (message.isNotBlank()) Text(message, Modifier.fillMaxWidth().padding(horizontal = 8.dp, vertical = 3.dp), color = MaterialTheme.colorScheme.primary, style = MaterialTheme.typography.bodySmall)
+                    Row(Modifier.fillMaxWidth().padding(horizontal = 8.dp, vertical = 4.dp), horizontalArrangement = Arrangement.SpaceBetween) {
                         OutlinedButton(
                             onClick = { currentUri = null; renderer?.close(); renderer = null; descriptor?.close(); descriptor = null },
                             shape = MaterialTheme.shapes.large,
@@ -338,6 +355,8 @@ fun QuietPdfApp() {
                             Spacer(Modifier.width(8.dp))
                             Text("Clear highlights")
                         }
+                    }
+                    }
                     }
                 }
             }
@@ -393,8 +412,7 @@ private fun PdfPageItem(
     }
 
     pageBitmap?.let { bmp ->
-        Column(Modifier.fillMaxWidth().padding(horizontal = 8.dp, vertical = 5.dp)) {
-            Box(Modifier.fillMaxWidth().clickable(enabled = !editMode) { onTapPage() }, contentAlignment = Alignment.TopCenter) {
+        Box(Modifier.fillMaxWidth().clickable(enabled = !editMode) { onTapPage() }, contentAlignment = Alignment.TopCenter) {
                 androidx.compose.foundation.Image(
                     bitmap = bmp.asImageBitmap(),
                     contentDescription = "PDF page ${pageIndex + 1}",
@@ -435,9 +453,6 @@ private fun PdfPageItem(
                     }
                 }
             }
-            Text("Page ${pageIndex + 1}", Modifier.align(Alignment.CenterHorizontally).padding(top = 3.dp),
-                style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
-        }
     } ?: Box(Modifier.fillMaxWidth().height(240.dp), contentAlignment = Alignment.Center) {
         CircularProgressIndicator()
     }
