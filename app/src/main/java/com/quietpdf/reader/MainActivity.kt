@@ -4,6 +4,7 @@ import android.graphics.Bitmap
 import android.graphics.Color as AndroidColor
 import android.graphics.pdf.PdfRenderer
 import android.net.Uri
+import android.content.Intent
 import android.os.Bundle
 import android.os.ParcelFileDescriptor
 import androidx.activity.ComponentActivity
@@ -17,12 +18,14 @@ import androidx.compose.foundation.gestures.detectDragGestures
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.*
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
+import kotlinx.coroutines.flow.collect
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.geometry.Offset
@@ -74,6 +77,7 @@ fun QuietPdfApp() {
     var docs by remember { mutableStateOf(listOf<DocItem>()) }
     var marks by remember { mutableStateOf(listOf<Mark>()) }
     var drawing by remember { mutableStateOf(false) }
+    var editMode by remember { mutableStateOf(false) }
     var dragStart by remember { mutableStateOf<Offset?>(null) }
     var dragEnd by remember { mutableStateOf<Offset?>(null) }
 
@@ -131,7 +135,7 @@ fun QuietPdfApp() {
     }
 
     LaunchedEffect(Unit) { loadDocs() }
-    LaunchedEffect(renderer, page) { if (renderer != null) renderPage(page) }
+    
 
     val picker = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
         if (uri != null) {
@@ -230,9 +234,7 @@ fun QuietPdfApp() {
             } else {
                 Column(Modifier.padding(padding).fillMaxSize()) {
                     Row(Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 4.dp), verticalAlignment = Alignment.CenterVertically) {
-                        IconButton(onClick = { renderPage(page - 1) }, enabled = page > 0) { Icon(Icons.Default.ChevronLeft, "Previous page") }
-                        Text("${page + 1} / $pageCount", modifier = Modifier.weight(1f), textAlign = androidx.compose.ui.text.style.TextAlign.Center)
-                        IconButton(onClick = { renderPage(page + 1) }, enabled = page < pageCount - 1) { Icon(Icons.Default.ChevronRight, "Next page") }
+                        Text("Page ${page + 1} of $pageCount", modifier = Modifier.weight(1f), textAlign = androidx.compose.ui.text.style.TextAlign.Start)
                         IconButton(onClick = {
                             val key = "bookmarks_${currentUri}"
                             val old = prefs.getString(key, "")!!.split(",").filter { it.isNotBlank() }.mapNotNull { it.toIntOrNull() }
@@ -240,13 +242,27 @@ fun QuietPdfApp() {
                             prefs.edit().putString(key, updated.joinToString(",")).apply()
                             message = if (page in old) "Bookmark removed" else "Page bookmarked"
                         }) { Icon(Icons.Default.BookmarkAdd, "Toggle bookmark") }
+                        IconButton(onClick = {
+                            currentUri?.let { uri ->
+                                val intent = Intent(Intent.ACTION_SEND).apply {
+                                    type = "application/pdf"
+                                    putExtra(Intent.EXTRA_STREAM, uri)
+                                    addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+                                }
+                                context.startActivity(Intent.createChooser(intent, "Share PDF"))
+                            }
+                        }) { Icon(Icons.Default.Share, "Share PDF") }
                     }
                     Row(Modifier.fillMaxWidth().padding(horizontal = 12.dp), verticalAlignment = Alignment.CenterVertically) {
                         OutlinedTextField(query, { query = it }, Modifier.weight(1f), singleLine = true, placeholder = { Text("Search in this PDF") })
                         IconButton(onClick = { searching = true; searchResults = emptyList() }) { Icon(Icons.Default.Search, "Search text") }
                     }
                     Row(Modifier.fillMaxWidth().padding(horizontal = 12.dp), verticalAlignment = Alignment.CenterVertically) {
-                        FilterChip(selected = drawing, onClick = { drawing = !drawing }, label = { Text(if (drawing) "Highlight: on" else "Highlight") }, leadingIcon = { Icon(Icons.Default.Highlight, null) })
+                        OutlinedButton(onClick = { editMode = !editMode; drawing = editMode; message = if (editMode) "Edit mode: drag over a page to add a highlight" else "Reading mode" }) {
+                            Icon(if (editMode) Icons.Default.Done else Icons.Default.Edit, null)
+                            Spacer(Modifier.width(6.dp))
+                            Text(if (editMode) "Done editing" else "Edit")
+                        }
                         Spacer(Modifier.width(8.dp))
                         TextButton(onClick = {
                             val key = "bookmarks_${currentUri}"
@@ -254,37 +270,31 @@ fun QuietPdfApp() {
                             message = if (pages.isEmpty()) "No bookmarks yet" else "Bookmarked pages: ${pages.mapNotNull { it.toIntOrNull() }.sorted().joinToString { (it + 1).toString() }}"
                         }) { Text("Bookmarks") }
                     }
-                    bitmap?.let { bmp ->
-                        Box(Modifier.weight(1f).fillMaxWidth().background(MaterialTheme.colorScheme.surfaceVariant).verticalScroll(rememberScrollState()), contentAlignment = Alignment.TopCenter) {
-                            Box(Modifier.fillMaxWidth().padding(8.dp)) {
-                                androidx.compose.foundation.Image(bitmap = bmp.asImageBitmap(), contentDescription = "PDF page ${page + 1}", modifier = Modifier.fillMaxWidth())
-                                Canvas(
-                                    Modifier.fillMaxWidth().height((bmp.height.toFloat() / bmp.width * (androidx.compose.ui.platform.LocalConfiguration.current.screenWidthDp - 16)).dp)
-                                        .pointerInput(drawing, page) {
-                                            if (drawing) detectDragGestures(
-                                                onDragStart = { dragStart = it; dragEnd = it },
-                                                onDrag = { change, _ -> dragEnd = change.position },
-                                                onDragEnd = {
-                                                    val s = dragStart; val e = dragEnd
-                                                    if (s != null && e != null) {
-                                                        val w = size.width.toFloat(); val h = size.height.toFloat()
-                                                        marks = marks + Mark(page, minOf(s.x,e.x)/w, minOf(s.y,e.y)/h, maxOf(s.x,e.x)/w, maxOf(s.y,e.y)/h)
-                                                        saveMarks()
-                                                    }
-                                                    dragStart = null; dragEnd = null
-                                                }
-                                            )
-                                        }
-                                ) {
-                                    marks.filter { it.page == page }.forEach {
-                                        drawRect(Color(0x66FFEB3B), Offset(it.left*size.width, it.top*size.height), Size((it.right-it.left)*size.width, (it.bottom-it.top)*size.height))
-                                    }
-                                    val s = dragStart; val e = dragEnd
-                                    if (drawing && s != null && e != null) drawRect(Color(0x66FFEB3B), Offset(minOf(s.x,e.x), minOf(s.y,e.y)), Size(kotlin.math.abs(e.x-s.x), kotlin.math.abs(e.y-s.y)))
-                                }
-                            }
+                    val listState = rememberLazyListState(initialFirstVisibleItemIndex = page)
+                    LaunchedEffect(listState) {
+                        snapshotFlow { listState.firstVisibleItemIndex }.collect { visiblePage ->
+                            page = visiblePage.coerceIn(0, (pageCount - 1).coerceAtLeast(0))
+                            currentUri?.let { prefs.edit().putInt("page_$it", page).apply() }
+                            docs = docs.map { if (it.uri == currentUri.toString()) it.copy(lastPage = page) else it }
+                            saveDocs()
                         }
-                    } ?: Box(Modifier.weight(1f).fillMaxWidth(), contentAlignment = Alignment.Center) { CircularProgressIndicator() }
+                    }
+                    LazyColumn(
+                        state = listState,
+                        modifier = Modifier.weight(1f).fillMaxWidth().background(MaterialTheme.colorScheme.surfaceVariant),
+                        horizontalAlignment = Alignment.CenterHorizontally,
+                        contentPadding = PaddingValues(vertical = 8.dp)
+                    ) {
+                        items(pageCount) { index ->
+                            PdfPageItem(
+                                renderer = renderer!!,
+                                pageIndex = index,
+                                marks = marks.filter { it.page == index },
+                                editMode = editMode,
+                                onAddMark = { mark -> marks = marks + mark; saveMarks() }
+                            )
+                        }
+                    }
                     if (message.isNotBlank()) Text(message, Modifier.fillMaxWidth().padding(8.dp), color = MaterialTheme.colorScheme.primary, style = MaterialTheme.typography.bodySmall)
                     Row(Modifier.fillMaxWidth().padding(8.dp), horizontalArrangement = Arrangement.SpaceBetween) {
                         OutlinedButton(
@@ -330,5 +340,81 @@ fun QuietPdfApp() {
             message = if (result.isEmpty()) "No matches found" else "Found on pages: ${result.map { it + 1 }.joinToString()}"
             searching = false
         } else if (searching) searching = false
+    }
+}
+
+@Composable
+private fun PdfPageItem(
+    renderer: PdfRenderer,
+    pageIndex: Int,
+    marks: List<Mark>,
+    editMode: Boolean,
+    onAddMark: (Mark) -> Unit
+) {
+    var pageBitmap by remember(pageIndex, renderer) { mutableStateOf<Bitmap?>(null) }
+    var dragStart by remember(pageIndex) { mutableStateOf<Offset?>(null) }
+    var dragEnd by remember(pageIndex) { mutableStateOf<Offset?>(null) }
+
+    LaunchedEffect(renderer, pageIndex) {
+        pageBitmap = runCatching {
+            renderer.openPage(pageIndex).use { pdfPage ->
+                val width = 1200
+                val height = (width.toFloat() * pdfPage.height / pdfPage.width).toInt().coerceAtLeast(1)
+                Bitmap.createBitmap(width, height, Bitmap.Config.ARGB_8888).also { bmp ->
+                    bmp.eraseColor(AndroidColor.WHITE)
+                    pdfPage.render(bmp, null, null, PdfRenderer.Page.RENDER_MODE_FOR_DISPLAY)
+                }
+            }
+        }.getOrNull()
+    }
+
+    pageBitmap?.let { bmp ->
+        Column(Modifier.fillMaxWidth().padding(horizontal = 8.dp, vertical = 5.dp)) {
+            Box(Modifier.fillMaxWidth(), contentAlignment = Alignment.TopCenter) {
+                androidx.compose.foundation.Image(
+                    bitmap = bmp.asImageBitmap(),
+                    contentDescription = "PDF page ${pageIndex + 1}",
+                    modifier = Modifier.fillMaxWidth()
+                )
+                Canvas(
+                    Modifier.fillMaxWidth()
+                        .aspectRatio(bmp.width.toFloat() / bmp.height.toFloat())
+                        .pointerInput(editMode, pageIndex) {
+                            if (editMode) detectDragGestures(
+                                onDragStart = { dragStart = it; dragEnd = it },
+                                onDrag = { change, _ -> dragEnd = change.position },
+                                onDragEnd = {
+                                    val a = dragStart
+                                    val b = dragEnd
+                                    if (a != null && b != null && kotlin.math.abs(a.x - b.x) > 8 && kotlin.math.abs(a.y - b.y) > 8) {
+                                        onAddMark(Mark(pageIndex,
+                                            (minOf(a.x, b.x) / size.width).coerceIn(0f, 1f),
+                                            (minOf(a.y, b.y) / size.height).coerceIn(0f, 1f),
+                                            (maxOf(a.x, b.x) / size.width).coerceIn(0f, 1f),
+                                            (maxOf(a.y, b.y) / size.height).coerceIn(0f, 1f)))
+                                    }
+                                    dragStart = null
+                                    dragEnd = null
+                                }
+                            )
+                        }
+                ) {
+                    marks.forEach { mark ->
+                        drawRect(Color(0x66FFEB3B), Offset(mark.left * size.width, mark.top * size.height),
+                            Size((mark.right - mark.left) * size.width, (mark.bottom - mark.top) * size.height))
+                    }
+                    val a = dragStart
+                    val b = dragEnd
+                    if (editMode && a != null && b != null) {
+                        drawRect(Color(0x66FFEB3B), Offset(minOf(a.x, b.x), minOf(a.y, b.y)),
+                            Size(kotlin.math.abs(b.x - a.x), kotlin.math.abs(b.y - a.y)))
+                    }
+                }
+            }
+            Text("Page ${pageIndex + 1}", Modifier.align(Alignment.CenterHorizontally).padding(top = 3.dp),
+                style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+        }
+    } ?: Box(Modifier.fillMaxWidth().height(240.dp), contentAlignment = Alignment.Center) {
+        CircularProgressIndicator()
     }
 }
