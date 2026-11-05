@@ -54,6 +54,7 @@ import androidx.compose.ui.graphics.Path
 import androidx.compose.ui.graphics.StrokeCap
 import androidx.compose.ui.graphics.nativeCanvas
 import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.input.pointer.PointerEventPass
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalView
 import androidx.core.view.WindowCompat
@@ -61,6 +62,7 @@ import androidx.core.view.WindowInsetsCompat
 import androidx.core.view.WindowInsetsControllerCompat
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.ImeAction
+import androidx.compose.ui.text.input.TextFieldValue
 import androidx.compose.foundation.text.selection.SelectionContainer
 import androidx.compose.foundation.text.KeyboardActions
 import androidx.compose.foundation.text.KeyboardOptions
@@ -74,6 +76,7 @@ import kotlinx.coroutines.sync.withLock
 import com.tom_roush.pdfbox.android.PDFBoxResourceLoader
 import com.tom_roush.pdfbox.pdmodel.PDDocument
 import com.tom_roush.pdfbox.pdmodel.PDPageContentStream
+import com.tom_roush.pdfbox.io.MemoryUsageSetting
 import com.tom_roush.pdfbox.pdmodel.graphics.state.PDExtendedGraphicsState
 import com.tom_roush.pdfbox.pdmodel.font.PDType1Font
 import android.util.Base64
@@ -118,7 +121,7 @@ fun QuietPdfApp() {
     var searchHighlights by remember { mutableStateOf(listOf<SearchHighlight>()) }
     var searching by remember { mutableStateOf(false) }
     var searchBarOpen by remember { mutableStateOf(false) }
-    var selectedText by remember { mutableStateOf("") }
+    var selectedTextValue by remember { mutableStateOf(TextFieldValue("")) }
     var message by remember { mutableStateOf("") }
     var docs by remember { mutableStateOf(listOf<DocItem>()) }
     var annotations by remember { mutableStateOf(listOf<Annotation>()) }
@@ -495,15 +498,44 @@ fun QuietPdfApp() {
                                 translationY = documentPan.y
                             }
                             .pointerInput(Unit) {
-                                detectTransformGestures(panZoomLock = false) { centroid, pan, zoomChange, _ ->
-                                    val oldScale = documentZoom
-                                    val newScale = (oldScale * zoomChange).coerceIn(1f, 8f)
-                                    val appliedScale = newScale / oldScale
-                                    // Keep the content point under the fingers stationary
-                                    // while scaling; include two-finger translation as well.
-                                    documentPan = if (newScale <= 1f) Offset.Zero else
-                                        (documentPan - centroid) * appliedScale + centroid + pan
-                                    documentZoom = newScale
+                                // Only a two-finger gesture may transform the document.
+                                // One-finger drags are left untouched for LazyColumn scrolling.
+                                awaitEachGesture {
+                                    awaitFirstDown(requireUnconsumed = false)
+                                    var previousCentroid: Offset? = null
+                                    var previousSpan = 0f
+                                    while (true) {
+                                        val event = awaitPointerEvent(PointerEventPass.Initial)
+                                        val pointers = event.changes.filter { it.pressed }
+                                        if (pointers.size >= 2) {
+                                            val centroid = Offset(
+                                                pointers.map { it.position.x }.average().toFloat(),
+                                                pointers.map { it.position.y }.average().toFloat()
+                                            )
+                                            val span = pointers.map {
+                                                val dx = it.position.x - centroid.x
+                                                val dy = it.position.y - centroid.y
+                                                kotlin.math.sqrt(dx * dx + dy * dy)
+                                            }.average().toFloat()
+                                            val oldCentroid = previousCentroid
+                                            if (oldCentroid != null && previousSpan > 0f && span > 0f) {
+                                                val oldScale = documentZoom
+                                                val newScale = (oldScale * (span / previousSpan)).coerceIn(1f, 4f)
+                                                val ratio = newScale / oldScale
+                                                val panDelta = centroid - oldCentroid
+                                                documentPan = if (newScale <= 1f) Offset.Zero else
+                                                    (documentPan - oldCentroid) * ratio + oldCentroid + panDelta
+                                                documentZoom = newScale
+                                            }
+                                            previousCentroid = centroid
+                                            previousSpan = span
+                                            pointers.forEach { it.consume() }
+                                        } else {
+                                            previousCentroid = null
+                                            previousSpan = 0f
+                                        }
+                                        if (pointers.isEmpty()) break
+                                    }
                                 }
                             }
                     ) {
@@ -536,11 +568,10 @@ fun QuietPdfApp() {
                                     val uri = currentUri
                                     if (uri != null) scope.launch {
                                         val extracted = withContext(Dispatchers.IO) {
-                                            val word = findWordAt(context, uri, index, point)
-                                            if (word.isNotBlank()) word else extractPageText(context, uri, index)
+                                            extractPageText(context, uri, index)
                                         }
                                         if (extracted.isNotBlank()) {
-                                            selectedText = extracted
+                                            selectedTextValue = TextFieldValue(extracted)
                                         } else {
                                             message = "No selectable text on this page. Scanned PDFs need OCR."
                                         }
@@ -621,19 +652,46 @@ fun QuietPdfApp() {
         }
     }
 
-    if (selectedText.isNotBlank()) AlertDialog(
-        onDismissRequest = { selectedText = "" },
-        title = { Text("Selected text") },
-        text = { SelectionContainer { Text(selectedText) } },
+    if (selectedTextValue.text.isNotBlank()) AlertDialog(
+        onDismissRequest = { selectedTextValue = TextFieldValue("") },
+        title = { Text("Select text to copy") },
+        text = {
+            Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                Text("Select any words or sentences below, then tap Copy selected. If nothing is selected, Copy all is used.",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant)
+                OutlinedTextField(
+                    value = selectedTextValue,
+                    onValueChange = { selectedTextValue = it },
+                    modifier = Modifier.fillMaxWidth().heightIn(min = 180.dp, max = 360.dp),
+                    minLines = 7,
+                    maxLines = 12
+                )
+            }
+        },
         confirmButton = {
             TextButton(onClick = {
+                val value = selectedTextValue
+                val start = minOf(value.selection.start, value.selection.end)
+                val end = maxOf(value.selection.start, value.selection.end)
+                val toCopy = if (start != end) value.text.substring(start, end) else value.text
                 val clipboard = context.getSystemService(android.content.Context.CLIPBOARD_SERVICE) as ClipboardManager
-                clipboard.setPrimaryClip(ClipData.newPlainText("PDF text", selectedText))
-                selectedText = ""
-                message = "Text copied."
-            }) { Text("Copy") }
+                clipboard.setPrimaryClip(ClipData.newPlainText("PDF text", toCopy))
+                selectedTextValue = TextFieldValue("")
+                message = if (start != end) "Selected text copied." else "Page text copied."
+            }) { Text("Copy selected") }
         },
-        dismissButton = { TextButton(onClick = { selectedText = "" }) { Text("Close") } }
+        dismissButton = {
+            Row {
+                TextButton(onClick = {
+                    val clipboard = context.getSystemService(android.content.Context.CLIPBOARD_SERVICE) as ClipboardManager
+                    clipboard.setPrimaryClip(ClipData.newPlainText("PDF text", selectedTextValue.text))
+                    selectedTextValue = TextFieldValue("")
+                    message = "Page text copied."
+                }) { Text("Copy all") }
+                TextButton(onClick = { selectedTextValue = TextFieldValue("") }) { Text("Close") }
+            }
+        }
     )
 
     if (pendingText != null) AlertDialog(
@@ -768,7 +826,7 @@ private fun extractPageText(context: android.content.Context, uri: Uri, pageInde
         context.contentResolver.openInputStream(uri)?.use { input ->
             FileOutputStream(temp).use { output -> input.copyTo(output) }
         } ?: return ""
-        PDDocument.load(temp).use { doc ->
+        PDDocument.load(temp, MemoryUsageSetting.setupTempFileOnly()).use { doc ->
             if (pageIndex !in 0 until doc.numberOfPages) return ""
             return PDFTextStripper().apply {
                 startPage = pageIndex + 1
