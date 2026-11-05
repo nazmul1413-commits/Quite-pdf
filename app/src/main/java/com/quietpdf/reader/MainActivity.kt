@@ -486,12 +486,13 @@ fun QuietPdfApp() {
                                 androidx.compose.foundation.gestures.detectTransformGestures(
                                     panZoomLock = false
                                 ) { centroid, pan, zoomChange, _ ->
-                                    val nextZoom = (documentZoom * zoomChange).coerceIn(1f, 8f)
+                                    val previousZoom = documentZoom.coerceAtLeast(0.001f)
+                                    val nextZoom = (previousZoom * zoomChange).coerceIn(1f, 8f)
+                                    val scaleChange = nextZoom / previousZoom
                                     documentZoom = nextZoom
                                     if (nextZoom <= 1f) {
                                         documentPan = Offset.Zero
                                     } else {
-                                        val scaleChange = nextZoom / documentZoom.coerceAtLeast(0.001f)
                                         documentPan = (documentPan - centroid) * scaleChange + centroid + pan
                                     }
                                 }
