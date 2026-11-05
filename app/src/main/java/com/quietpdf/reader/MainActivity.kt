@@ -121,6 +121,27 @@ fun QuietPdfApp() {
     var annotationUndo by remember { mutableStateOf(listOf<List<Annotation>>()) }
     var annotationRedo by remember { mutableStateOf(listOf<List<Annotation>>()) }
 
+    BackHandler(enabled = fullScreen) { fullScreen = false }
+    var dragStart by remember { mutableStateOf<Offset?>(null) }
+    var dragEnd by remember { mutableStateOf<Offset?>(null) }
+
+    fun saveDocs() {
+        prefs.edit().putString("docs", docs.joinToString("\n") { "${it.uri}\t${it.name}\t${it.lastPage}" }).apply()
+    }
+    fun loadDocs() {
+        docs = prefs.getString("docs", "")!!.lines().filter { it.contains('\t') }.mapNotNull {
+            val p = it.split('\t')
+            if (p.size >= 3) DocItem(p[0], p[1], p[2].toIntOrNull() ?: 0) else null
+        }
+    }
+    fun saveAnnotations() {
+        val encoded = annotations.joinToString("\n") { item ->
+            val pts = item.points.joinToString(";") { "${it.x},${it.y}" }
+            val txt = Base64.encodeToString(item.text.toByteArray(Charsets.UTF_8), Base64.NO_WRAP)
+            listOf(item.page,item.kind,item.color,item.width,txt,pts).joinToString("|")
+        }
+        prefs.edit().putString("annotations_${currentUri}", encoded).apply()
+    }
     fun updateAnnotations(next: List<Annotation>) {
         annotationUndo = annotationUndo + listOf(annotations)
         annotationRedo = emptyList()
@@ -142,27 +163,6 @@ fun QuietPdfApp() {
             annotationRedo = annotationRedo.dropLast(1)
             saveAnnotations()
         }
-    }
-    BackHandler(enabled = fullScreen) { fullScreen = false }
-    var dragStart by remember { mutableStateOf<Offset?>(null) }
-    var dragEnd by remember { mutableStateOf<Offset?>(null) }
-
-    fun saveDocs() {
-        prefs.edit().putString("docs", docs.joinToString("\n") { "${it.uri}\t${it.name}\t${it.lastPage}" }).apply()
-    }
-    fun loadDocs() {
-        docs = prefs.getString("docs", "")!!.lines().filter { it.contains('\t') }.mapNotNull {
-            val p = it.split('\t')
-            if (p.size >= 3) DocItem(p[0], p[1], p[2].toIntOrNull() ?: 0) else null
-        }
-    }
-    fun saveAnnotations() {
-        val encoded = annotations.joinToString("\n") { item ->
-            val pts = item.points.joinToString(";") { "${it.x},${it.y}" }
-            val txt = Base64.encodeToString(item.text.toByteArray(Charsets.UTF_8), Base64.NO_WRAP)
-            listOf(item.page,item.kind,item.color,item.width,txt,pts).joinToString("|")
-        }
-        prefs.edit().putString("annotations_${currentUri}", encoded).apply()
     }
     fun openPdf(uri: Uri, name: String) {
         try {
@@ -563,6 +563,7 @@ fun QuietPdfApp() {
                             )
                         }
                     }
+                    }
                     AnimatedVisibility(visible = !fullScreen, enter = fadeIn(tween(220)) + slideInVertically(tween(220)) { it / 3 }, exit = fadeOut(tween(160)) + slideOutVertically(tween(160)) { it / 3 }) {
                     Column {
                     if (message.isNotBlank()) Text(message, Modifier.fillMaxWidth().padding(horizontal = 8.dp, vertical = 3.dp), color = MaterialTheme.colorScheme.primary, style = MaterialTheme.typography.bodySmall)
@@ -687,13 +688,13 @@ private fun PdfPageItem(
                     if(activeTool=="RECTANGLE"&&dragEnd!=null){val p=dragEnd!!;drawRect(Color(0xFF1565C0),Offset(minOf(strokePoints[0].x*size.width,p.x),minOf(strokePoints[0].y*size.height,p.y)),Size(kotlin.math.abs(p.x-strokePoints[0].x*size.width),kotlin.math.abs(p.y-strokePoints[0].y*size.height)),style=androidx.compose.ui.graphics.drawscope.Stroke(2.dp.toPx()))}
                     else drawPath(path,if(activeTool=="HIGHLIGHTER")Color(0x66FFEB3B) else Color(0xFF202124),style=androidx.compose.ui.graphics.drawscope.Stroke(if(activeTool=="HIGHLIGHTER")18.dp.toPx() else 3.dp.toPx(),cap=StrokeCap.Round))
                 }
+            }
             Text(
                 text = "${pageIndex + 1}",
                 modifier = Modifier.align(Alignment.BottomCenter).padding(bottom = 7.dp),
                 color = Color(0xFF9E9E9E),
                 style = MaterialTheme.typography.labelSmall
             )
-            }
         }
     }?:Box(Modifier.fillMaxWidth().height(240.dp),contentAlignment=Alignment.Center){CircularProgressIndicator()}
 }
