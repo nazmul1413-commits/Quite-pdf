@@ -112,7 +112,9 @@ fun QuietPdfApp() {
     var textDraft by remember { mutableStateOf("") }
     var drawing by remember { mutableStateOf(false) }
     var editMode by remember { mutableStateOf(false) }
-    var fullScreen by remember { mutableStateOf(true) }
+    var fullScreen by remember { mutableStateOf(false) }
+    var documentZoom by remember { mutableFloatStateOf(1f) }
+    var documentPan by remember { mutableStateOf(Offset.Zero) }
     BackHandler(enabled = fullScreen) { fullScreen = false }
     var dragStart by remember { mutableStateOf<Offset?>(null) }
     var dragEnd by remember { mutableStateOf<Offset?>(null) }
@@ -144,6 +146,8 @@ fun QuietPdfApp() {
             renderer = r
             currentUri = uri
             currentName = name
+            documentZoom = 1f
+            documentPan = Offset.Zero
             fullScreen = true
             pageCount = r.pageCount
             page = prefs.getInt("page_${uri}", 0).coerceIn(0, (r.pageCount - 1).coerceAtLeast(0))
@@ -454,6 +458,7 @@ fun QuietPdfApp() {
                         state = listState,
                         modifier = Modifier.weight(1f).fillMaxWidth().background(MaterialTheme.colorScheme.surfaceVariant),
                         horizontalAlignment = Alignment.CenterHorizontally,
+                        verticalArrangement = if (pageCount == 1) Arrangement.Center else Arrangement.Top,
                         contentPadding = PaddingValues(0.dp)
                     ) {
                         items(pageCount) { index ->
@@ -462,6 +467,13 @@ fun QuietPdfApp() {
                                 renderMutex = renderMutex,
                                 pageIndex = index,
                                 annotations = annotations.filter { it.page == index },
+                                documentZoom = documentZoom,
+                                documentPan = documentPan,
+                                onDocumentZoomChange = { next ->
+                                    documentZoom = next
+                                    if (next <= 1f) documentPan = Offset.Zero
+                                },
+                                onDocumentPanBy = { delta -> documentPan += delta },
                                 editMode = editMode,
                                 activeTool = activeTool,
                                 onAddAnnotation = { item -> annotations = annotations + item; saveAnnotations() },
@@ -550,12 +562,12 @@ fun QuietPdfApp() {
 @Composable
 private fun PdfPageItem(
     renderer: PdfRenderer, renderMutex: Mutex, pageIndex: Int, annotations: List<Annotation>,
+    documentZoom: Float, documentPan: Offset,
+    onDocumentZoomChange: (Float) -> Unit, onDocumentPanBy: (Offset) -> Unit,
     editMode: Boolean, activeTool: String, onAddAnnotation: (Annotation)->Unit,
     onErase: (Offset)->Unit, onTextTap: (Offset)->Unit, onTapPage: ()->Unit
 ) {
     var pageBitmap by remember(pageIndex,renderer){mutableStateOf<Bitmap?>(null)}
-    var zoom by remember(pageIndex,renderer){mutableFloatStateOf(1f)}
-    var pan by remember(pageIndex,renderer){mutableStateOf(Offset.Zero)}
     var strokePoints by remember(pageIndex){mutableStateOf(listOf<Offset>())}
     var dragEnd by remember(pageIndex){mutableStateOf<Offset?>(null)}
     LaunchedEffect(renderer,pageIndex){
@@ -568,12 +580,12 @@ private fun PdfPageItem(
         Box(
             Modifier.fillMaxWidth()
                 .graphicsLayer {
-                    scaleX = zoom
-                    scaleY = zoom
-                    translationX = pan.x
-                    translationY = pan.y
+                    scaleX = documentZoom
+                    scaleY = documentZoom
+                    translationX = documentPan.x
+                    translationY = documentPan.y
                 }
-                .pointerInput(pageIndex) {
+                .pointerInput(pageIndex, documentZoom) {
                     // Only handle two-finger gestures here. A one-finger drag must
                     // remain available to LazyColumn for normal vertical scrolling.
                     awaitEachGesture {
@@ -595,9 +607,9 @@ private fun PdfPageItem(
                                     kotlin.math.sqrt(dx * dx + dy * dy)
                                 }.average().toFloat()
                                 if (trackingPinch && previousSpan > 0f) {
-                                    val nextZoom = (zoom * (span / previousSpan)).coerceIn(1f, 5f)
-                                    zoom = nextZoom
-                                    pan = if (nextZoom <= 1f) Offset.Zero else pan + (centroid - previousCentroid)
+                                    val nextZoom = (documentZoom * (span / previousSpan)).coerceIn(1f, 5f)
+                                    onDocumentZoomChange(nextZoom)
+                                    if (nextZoom > 1f) onDocumentPanBy(centroid - previousCentroid)
                                     event.changes.forEach { if (it.pressed) it.consume() }
                                 }
                                 previousCentroid = centroid
