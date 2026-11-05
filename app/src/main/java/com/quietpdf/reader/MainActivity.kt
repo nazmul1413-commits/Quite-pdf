@@ -56,6 +56,9 @@ import androidx.core.view.WindowCompat
 import androidx.core.view.WindowInsetsCompat
 import androidx.core.view.WindowInsetsControllerCompat
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.input.ImeAction
+import androidx.compose.foundation.text.KeyboardActions
+import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.ui.unit.dp
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
@@ -69,6 +72,7 @@ import com.tom_roush.pdfbox.pdmodel.PDPageContentStream
 import com.tom_roush.pdfbox.pdmodel.graphics.state.PDExtendedGraphicsState
 import com.tom_roush.pdfbox.pdmodel.font.PDType1Font
 import android.util.Base64
+import android.util.LruCache
 import android.graphics.Paint as AndroidPaint
 import com.tom_roush.pdfbox.text.PDFTextStripper
 import java.io.File
@@ -110,6 +114,12 @@ fun QuietPdfApp() {
     var docs by remember { mutableStateOf(listOf<DocItem>()) }
     var annotations by remember { mutableStateOf(listOf<Annotation>()) }
     var activeTool by remember { mutableStateOf("HIGHLIGHTER") }
+    var annotationColor by remember { mutableIntStateOf(0xFFFFEB3B.toInt()) }
+    val pageBitmapCache = remember(renderer) {
+        object : LruCache<Int, Bitmap>(72 * 1024) {
+            override fun sizeOf(key: Int, value: Bitmap): Int = (value.byteCount / 1024).coerceAtLeast(1)
+        }
+    }
     var pendingText by remember { mutableStateOf<Pair<Int, Offset>?>(null) }
     var textDraft by remember { mutableStateOf("") }
     var drawing by remember { mutableStateOf(false) }
@@ -315,9 +325,11 @@ fun QuietPdfApp() {
                                 OutlinedTextField(
                                     value = query,
                                     onValueChange = { query = it; searchResults = emptyList() },
-                                    modifier = Modifier.width(176.dp).height(48.dp),
+                                    modifier = Modifier.width(190.dp).height(48.dp),
                                     singleLine = true,
                                     textStyle = MaterialTheme.typography.bodySmall,
+                                    keyboardOptions = KeyboardOptions(imeAction = ImeAction.Search),
+                                    keyboardActions = KeyboardActions(onSearch = { if (query.isNotBlank() && currentUri != null) searching = true }),
                                     placeholder = { Text("Find in PDF", style = MaterialTheme.typography.bodySmall) }
                                 )
                                 IconButton(
@@ -417,9 +429,22 @@ fun QuietPdfApp() {
                     AnimatedVisibility(visible = !fullScreen, enter = fadeIn(tween(220)) + slideInVertically(tween(220)) { -it / 3 }, exit = fadeOut(tween(160)) + slideOutVertically(tween(160)) { -it / 3 }) {
                     Column {
 
-                    if(editMode) Row(Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()).padding(horizontal=8.dp),horizontalArrangement=Arrangement.spacedBy(6.dp)){
-                        listOf("PEN" to "Pen","HIGHLIGHTER" to "Highlighter","RECTANGLE" to "Rectangle","TEXT" to "Text","ERASER" to "Eraser").forEach{(tool,label)->
-                            FilterChip(selected=activeTool==tool,onClick={activeTool=tool},label={Text(label)})
+                    if(editMode) {
+                        Row(Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()).padding(horizontal=8.dp),horizontalArrangement=Arrangement.spacedBy(6.dp), verticalAlignment=Alignment.CenterVertically){
+                            listOf("PEN" to "Pen","HIGHLIGHTER" to "Highlight","UNDERLINE" to "Underline","RECTANGLE" to "Rectangle","TEXT" to "Text","ERASER" to "Eraser").forEach{(tool,label)->
+                                FilterChip(selected=activeTool==tool,onClick={activeTool=tool},label={Text(label)})
+                            }
+                            if(activeTool=="HIGHLIGHTER" || activeTool=="UNDERLINE" || activeTool=="PEN") {
+                                HorizontalDivider(Modifier.height(24.dp).width(1.dp), color=MaterialTheme.colorScheme.outlineVariant)
+                                listOf(0xFFFFEB3B.toInt(),0xFFFF9800.toInt(),0xFF4CAF50.toInt(),0xFF2196F3.toInt(),0xFFE91E63.toInt(),0xFF202124.toInt()).forEach { swatch ->
+                                    Surface(
+                                        modifier=Modifier.size(28.dp).clickable { annotationColor=swatch },
+                                        shape=MaterialTheme.shapes.small,
+                                        color=Color(swatch),
+                                        border=if(annotationColor==swatch) androidx.compose.foundation.BorderStroke(2.dp,MaterialTheme.colorScheme.primary) else null
+                                    ) {}
+                                }
+                            }
                         }
                     }
                     }
@@ -449,7 +474,7 @@ fun QuietPdfApp() {
                     }
                     Box(
                         modifier = Modifier.weight(1f).fillMaxWidth()
-                            .background(MaterialTheme.colorScheme.surfaceVariant)
+                            .background(if (dark || night) Color(0xFF202020) else Color(0xFFF7F7F7))
                             .clipToBounds()
                             .graphicsLayer {
                                 scaleX = documentZoom
@@ -505,11 +530,14 @@ fun QuietPdfApp() {
                             PdfPageItem(
                                 renderer = renderer!!,
                                 renderMutex = renderMutex,
+                                bitmapCache = pageBitmapCache,
+                                renderWidth = (context.resources.displayMetrics.widthPixels * 2.0f).toInt().coerceIn(1800, 2600),
                                 pageIndex = index,
                                 annotations = annotations.filter { it.page == index },
                                 documentZoom = documentZoom,
                                 editMode = editMode,
                                 activeTool = activeTool,
+                                annotationColor = annotationColor,
                                 onAddAnnotation = { item -> updateAnnotations(annotations + item) },
                                 onErase = { point ->
                                     updateAnnotations(annotations.filterNot { item -> item.page == index && item.points.any { candidate -> val dx=candidate.x-point.x; val dy=candidate.y-point.y; dx*dx+dy*dy < 0.002f } })
@@ -587,85 +615,99 @@ fun QuietPdfApp() {
     )
 
     LaunchedEffect(searching) {
-        if (searching && query.isNotBlank() && currentUri != null) {
-            val uri = currentUri!!
+        if (searching) {
+            val uri = currentUri
             val term = query.trim().replace(Regex("\\s+"), " ")
-            val searchOutcome = withContext(Dispatchers.IO) {
-                runCatching {
-                    val temp = File.createTempFile("quiet_search_", ".pdf", context.cacheDir)
-                    try {
-                        context.contentResolver.openInputStream(uri)?.use { input ->
-                            FileOutputStream(temp).use { output -> input.copyTo(output) }
-                        } ?: error("Cannot read this PDF")
-                        PDDocument.load(temp).use { doc ->
-                            val matches = mutableListOf<Int>()
-                            for (index in 0 until doc.numberOfPages) {
+            if (uri == null || term.isBlank()) {
+                message = "Open a PDF and enter a search term."
+                searching = false
+            } else {
+                message = "Searching…"
+                val outcome = withContext(Dispatchers.IO) {
+                    runCatching {
+                        val temp = File.createTempFile("quiet_search_", ".pdf", context.cacheDir)
+                        try {
+                            context.contentResolver.openInputStream(uri)?.use { input ->
+                                FileOutputStream(temp).use { output -> input.copyTo(output) }
+                            } ?: error("Android could not read this PDF file.")
+                            PDDocument.load(temp).use { doc ->
+                                val matches = ArrayList<Int>()
                                 val stripper = PDFTextStripper().apply {
-                                    startPage = index + 1
-                                    endPage = index + 1
                                     sortByPosition = true
+                                    setShouldSeparateByBeads(false)
                                 }
-                                val pageText = stripper.getText(doc).replace(Regex("\\s+"), " ")
-                                if (pageText.contains(term, ignoreCase = true)) matches.add(index)
+                                for (index in 0 until doc.numberOfPages) {
+                                    stripper.startPage = index + 1
+                                    stripper.endPage = index + 1
+                                    val extracted = stripper.getText(doc)
+                                    val normalized = extracted
+                                        .replace('\u00A0', ' ')
+                                        .replace(Regex("[\\t\\r\\n\\u000C]+"), " ")
+                                        .replace(Regex(" +"), " ")
+                                        .trim()
+                                    if (normalized.contains(term, ignoreCase = true)) matches.add(index)
+                                }
+                                matches
                             }
-                            matches
+                        } finally {
+                            temp.delete()
                         }
-                    } finally {
-                        temp.delete()
                     }
                 }
-            }
-            searchOutcome.onSuccess { result ->
-                searchResults = result
-                if (result.isNotEmpty()) {
-                    page = result.first()
-                    listState.animateScrollToItem(result.first())
-                    message = "Found ${result.size} matching page(s). Select a page chip to jump to another match."
-                } else {
-                    message = "No text matches found. Scanned/image-only PDFs need OCR, which is not available yet."
+                outcome.onSuccess { matches ->
+                    searchResults = matches
+                    if (matches.isNotEmpty()) {
+                        page = matches.first()
+                        listState.animateScrollToItem(matches.first())
+                        message = "Found on ${matches.size} page(s)."
+                    } else {
+                        message = "No selectable text found for “${term}”. This may be a scanned PDF; OCR is not yet supported."
+                    }
+                }.onFailure { error ->
+                    searchResults = emptyList()
+                    message = "Search error: ${error.message ?: error.javaClass.simpleName}"
                 }
-            }.onFailure { error ->
-                searchResults = emptyList()
-                message = "Search failed: ${error.message ?: "Unable to read PDF text"}"
+                searching = false
             }
-            searching = false
-        } else if (searching) {
-            message = "Open a PDF and enter a search term."
-            searching = false
         }
     }
 }
 
 @Composable
 private fun PdfPageItem(
-    renderer: PdfRenderer, renderMutex: Mutex, pageIndex: Int, annotations: List<Annotation>,
+    renderer: PdfRenderer, renderMutex: Mutex, bitmapCache: LruCache<Int, Bitmap>, renderWidth: Int,
+    pageIndex: Int, annotations: List<Annotation>,
     documentZoom: Float,
-    editMode: Boolean, activeTool: String, onAddAnnotation: (Annotation)->Unit,
+    editMode: Boolean, activeTool: String, annotationColor: Int, onAddAnnotation: (Annotation)->Unit,
     onErase: (Offset)->Unit, onTextTap: (Offset)->Unit, onTapPage: ()->Unit
 ) {
     var pageBitmap by remember(pageIndex,renderer){mutableStateOf<Bitmap?>(null)}
     var strokePoints by remember(pageIndex){mutableStateOf(listOf<Offset>())}
     var dragEnd by remember(pageIndex){mutableStateOf<Offset?>(null)}
-    var settledZoom by remember(pageIndex, renderer) { mutableFloatStateOf(documentZoom) }
-    LaunchedEffect(documentZoom) {
-        delay(420)
-        settledZoom = documentZoom
-    }
-    val screenWidthPx = LocalContext.current.resources.displayMetrics.widthPixels
-    val renderWidth = (screenWidthPx * settledZoom * 1.15f).toInt().coerceIn(1400, 2800)
-    LaunchedEffect(renderer,pageIndex,renderWidth){
-        pageBitmap = runCatching {
-            renderMutex.withLock {
-                renderer.openPage(pageIndex).use { pdfPage ->
-                    val w = renderWidth
-                    val h = (w.toFloat() * pdfPage.height / pdfPage.width).toInt().coerceAtLeast(1)
-                    Bitmap.createBitmap(w,h,Bitmap.Config.ARGB_8888).also {
-                        it.eraseColor(AndroidColor.WHITE)
-                        pdfPage.render(it,null,null,PdfRenderer.Page.RENDER_MODE_FOR_DISPLAY)
+    LaunchedEffect(renderer,pageIndex,renderWidth) {
+        val cached = bitmapCache.get(pageIndex)
+        if (cached != null && !cached.isRecycled) {
+            pageBitmap = cached
+        } else {
+            val rendered = withContext(Dispatchers.IO) {
+                runCatching {
+                    renderMutex.withLock {
+                        renderer.openPage(pageIndex).use { pdfPage ->
+                            val w = renderWidth
+                            val h = (w.toFloat() * pdfPage.height / pdfPage.width).toInt().coerceAtLeast(1)
+                            Bitmap.createBitmap(w,h,Bitmap.Config.ARGB_8888).also {
+                                it.eraseColor(AndroidColor.WHITE)
+                                pdfPage.render(it,null,null,PdfRenderer.Page.RENDER_MODE_FOR_DISPLAY)
+                            }
+                        }
                     }
-                }
+                }.getOrNull()
             }
-        }.getOrNull()
+            if (rendered != null) {
+                bitmapCache.put(pageIndex, rendered)
+                pageBitmap = rendered
+            }
+        }
     }
     pageBitmap?.let{bmp->
         Box(
@@ -685,7 +727,8 @@ private fun PdfPageItem(
                         if(activeTool=="ERASER")onErase(p)
                     },
                     onDragEnd={
-                        if((activeTool=="PEN"||activeTool=="HIGHLIGHTER")&&strokePoints.isNotEmpty()) onAddAnnotation(Annotation(pageIndex,activeTool,strokePoints,if(activeTool=="PEN")0xFF202124.toInt() else 0xFFFFD600.toInt(),if(activeTool=="PEN")0.0025f else 0.018f))
+                        if((activeTool=="PEN"||activeTool=="HIGHLIGHTER")&&strokePoints.isNotEmpty()) onAddAnnotation(Annotation(pageIndex,activeTool,strokePoints,annotationColor,if(activeTool=="PEN")0.0025f else 0.018f))
+                        if(activeTool=="UNDERLINE"&&strokePoints.size>=2) onAddAnnotation(Annotation(pageIndex,"UNDERLINE",listOf(strokePoints.first(),strokePoints.last()),annotationColor,0.0035f))
                         if(activeTool=="RECTANGLE"&&strokePoints.isNotEmpty()&&dragEnd!=null){val p=dragEnd!!;onAddAnnotation(Annotation(pageIndex,"RECTANGLE",listOf(strokePoints.first(),Offset((p.x/size.width).coerceIn(0f,1f),(p.y/size.height).coerceIn(0f,1f))),0xFF1565C0.toInt(),0.0025f))}
                         strokePoints=emptyList();dragEnd=null
                     }
@@ -697,6 +740,7 @@ private fun PdfPageItem(
                         when(item.kind){
                             "PEN"->drawPath(path,Color(item.color),style=androidx.compose.ui.graphics.drawscope.Stroke(item.width*size.width,cap=StrokeCap.Round))
                             "HIGHLIGHTER"->drawPath(path,Color(item.color).copy(alpha=0.30f),style=androidx.compose.ui.graphics.drawscope.Stroke(item.width*size.width,cap=StrokeCap.Round))
+                            "UNDERLINE"->if(pts.size>=2) drawLine(Color(item.color),Offset(pts.first().x*size.width,pts.first().y*size.height),Offset(pts.last().x*size.width,pts.last().y*size.height),strokeWidth=item.width*size.width,cap=StrokeCap.Round)
                             "RECTANGLE"->if(pts.size>=2)drawRect(Color(item.color),Offset(minOf(pts[0].x,pts[1].x)*size.width,minOf(pts[0].y,pts[1].y)*size.height),Size(kotlin.math.abs(pts[1].x-pts[0].x)*size.width,kotlin.math.abs(pts[1].y-pts[0].y)*size.height),style=androidx.compose.ui.graphics.drawscope.Stroke(item.width*size.width))
                             "HIGHLIGHT_BOX"->if(pts.size>=2)drawRect(Color(item.color).copy(alpha=0.38f),Offset(minOf(pts[0].x,pts[1].x)*size.width,minOf(pts[0].y,pts[1].y)*size.height),Size(kotlin.math.abs(pts[1].x-pts[0].x)*size.width,kotlin.math.abs(pts[1].y-pts[0].y)*size.height))
                             "TEXT"->drawContext.canvas.nativeCanvas.drawText(item.text,pts[0].x*size.width,pts[0].y*size.height,AndroidPaint().apply{color=item.color;textSize=16f*density;isAntiAlias=true})
@@ -706,7 +750,8 @@ private fun PdfPageItem(
                 if(editMode&&strokePoints.isNotEmpty()&&activeTool!="ERASER"){
                     val path=Path().apply{moveTo(strokePoints[0].x*size.width,strokePoints[0].y*size.height);strokePoints.drop(1).forEach{lineTo(it.x*size.width,it.y*size.height)}}
                     if(activeTool=="RECTANGLE"&&dragEnd!=null){val p=dragEnd!!;drawRect(Color(0xFF1565C0),Offset(minOf(strokePoints[0].x*size.width,p.x),minOf(strokePoints[0].y*size.height,p.y)),Size(kotlin.math.abs(p.x-strokePoints[0].x*size.width),kotlin.math.abs(p.y-strokePoints[0].y*size.height)),style=androidx.compose.ui.graphics.drawscope.Stroke(2.dp.toPx()))}
-                    else drawPath(path,if(activeTool=="HIGHLIGHTER")Color(0x66FFEB3B) else Color(0xFF202124),style=androidx.compose.ui.graphics.drawscope.Stroke(if(activeTool=="HIGHLIGHTER")18.dp.toPx() else 3.dp.toPx(),cap=StrokeCap.Round))
+                    else if(activeTool=="UNDERLINE" && strokePoints.size>=2) drawLine(Color(annotationColor),Offset(strokePoints.first().x*size.width,strokePoints.first().y*size.height),Offset(strokePoints.last().x*size.width,strokePoints.last().y*size.height),strokeWidth=2.dp.toPx(),cap=StrokeCap.Round)
+                    else drawPath(path,if(activeTool=="HIGHLIGHTER")Color(annotationColor).copy(alpha=0.30f) else Color(annotationColor),style=androidx.compose.ui.graphics.drawscope.Stroke(if(activeTool=="HIGHLIGHTER")18.dp.toPx() else 3.dp.toPx(),cap=StrokeCap.Round))
                 }
             }
             Text(
