@@ -489,6 +489,18 @@ fun QuietPdfApp() {
         }
     }
 
+    if (pendingText != null) AlertDialog(
+        onDismissRequest = { pendingText = null },
+        title = { Text("Add text annotation") },
+        text = { OutlinedTextField(value=textDraft,onValueChange={textDraft=it},label={Text("Text")}) },
+        confirmButton = { TextButton(onClick={
+            val target = pendingText!!
+            if(textDraft.isNotBlank()){ annotations = annotations + Annotation(target.first,"TEXT",listOf(target.second),0xFF1565C0.toInt(),0.004f,textDraft); saveAnnotations() }
+            pendingText = null
+        }) { Text("Add") } },
+        dismissButton = { TextButton(onClick={pendingText=null}) { Text("Cancel") } }
+    )
+
     LaunchedEffect(searching) {
         if (searching && query.isNotBlank() && currentUri != null) {
             val uri = currentUri!!
