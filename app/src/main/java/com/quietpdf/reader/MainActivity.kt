@@ -400,18 +400,21 @@ fun QuietPdfApp() {
                     }
                     }
                     AnimatedVisibility(visible = !fullScreen, enter = fadeIn(tween(220)) + slideInVertically(tween(220)) { -it / 3 }, exit = fadeOut(tween(160)) + slideOutVertically(tween(160)) { -it / 3 }) {
-                    Row(Modifier.fillMaxWidth().padding(horizontal = 12.dp), verticalAlignment = Alignment.CenterVertically) {
-                        OutlinedButton(onClick = { editMode = !editMode; drawing = editMode; message = if (editMode) "Edit mode: drag over a page to add a highlight" else "Reading mode" }) {
-                            Icon(if (editMode) Icons.Default.Done else Icons.Default.Edit, null)
-                            Spacer(Modifier.width(6.dp))
-                            Text(if (editMode) "Done editing" else "Edit")
+                    Column {
+                    Row(Modifier.fillMaxWidth().padding(horizontal=12.dp),verticalAlignment=Alignment.CenterVertically){
+                        OutlinedButton(onClick={editMode=!editMode;message=if(editMode) "Choose a tool and draw or tap on the page" else "Reading mode"}){
+                            Icon(if(editMode) Icons.Default.Done else Icons.Default.Edit,null); Spacer(Modifier.width(6.dp)); Text(if(editMode) "Done" else "Edit")
                         }
                         Spacer(Modifier.width(8.dp))
-                        TextButton(onClick = {
-                            val key = "bookmarks_${currentUri}"
-                            val pages = prefs.getString(key, "")!!.split(",").filter { it.isNotBlank() }
-                            message = if (pages.isEmpty()) "No bookmarks yet" else "Bookmarked pages: ${pages.mapNotNull { it.toIntOrNull() }.sorted().joinToString { (it + 1).toString() }}"
-                        }) { Text("Bookmarks") }
+                        TextButton(onClick={
+                            val key="bookmarks_${currentUri}"; val pages=prefs.getString(key,"")!!.split(",").filter{it.isNotBlank()}
+                            message=if(pages.isEmpty()) "No bookmarks yet" else "Bookmarked pages: ${pages.mapNotNull{it.toIntOrNull()}.sorted().joinToString{(it+1).toString()}}"
+                        }){Text("Bookmarks")}
+                    }
+                    if(editMode) Row(Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()).padding(horizontal=8.dp),horizontalArrangement=Arrangement.spacedBy(6.dp)){
+                        listOf("PEN" to "Pen","HIGHLIGHTER" to "Highlighter","RECTANGLE" to "Rectangle","TEXT" to "Text","ERASER" to "Eraser").forEach{(tool,label)->
+                            FilterChip(selected=activeTool==tool,onClick={activeTool=tool},label={Text(label)})
+                        }
                     }
                     }
                     val listState = rememberLazyListState(initialFirstVisibleItemIndex = page)
@@ -434,9 +437,15 @@ fun QuietPdfApp() {
                                 renderer = renderer!!,
                                 renderMutex = renderMutex,
                                 pageIndex = index,
-                                marks = marks.filter { it.page == index },
+                                annotations = annotations.filter { it.page == index },
                                 editMode = editMode,
-                                onAddMark = { mark -> marks = marks + mark; saveMarks() },
+                                activeTool = activeTool,
+                                onAddAnnotation = { item -> annotations = annotations + item; saveAnnotations() },
+                                onErase = { point ->
+                                    annotations = annotations.filterNot { item -> item.page == index && item.points.any { (it-point).getDistance() < 0.045f } }
+                                    saveAnnotations()
+                                },
+                                onTextTap = { point -> pendingText = index to point; textDraft = "" },
                                 onTapPage = { fullScreen = !fullScreen }
                             )
                         }
@@ -464,7 +473,7 @@ fun QuietPdfApp() {
                             Text("Save copy")
                         }
                         FilledTonalButton(
-                            onClick = { marks = emptyList(); saveMarks(); message = "All annotations cleared from this document" },
+                            onClick = { annotations = emptyList(); saveAnnotations(); message = "All annotations cleared from this document" },
                             shape = MaterialTheme.shapes.large,
                             contentPadding = PaddingValues(horizontal = 16.dp, vertical = 10.dp)
                         ) {
