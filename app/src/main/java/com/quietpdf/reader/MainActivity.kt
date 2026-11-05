@@ -317,19 +317,29 @@ fun QuietPdfApp() {
         Scaffold(
             topBar = {
                 AnimatedVisibility(visible = !fullScreen, enter = fadeIn(tween(220)) + slideInVertically(tween(220)) { -it / 3 }, exit = fadeOut(tween(160)) + slideOutVertically(tween(160)) { -it / 3 }) {
-                    TopAppBar(
-                    modifier = Modifier,
-                    title = {
-                        if (currentUri != null) Text(currentName, fontWeight = FontWeight.Medium, maxLines = 1)
-                        else Text("Your library", fontWeight = FontWeight.SemiBold)
-                    },
-                    actions = {
-                        IconButton(onClick = { searchBarOpen = !searchBarOpen; if (!searchBarOpen) query = "" }) {
-                            Icon(Icons.Default.Search, "Search in PDF")
+                    Surface(
+                        color = MaterialTheme.colorScheme.surface,
+                        tonalElevation = 0.dp
+                    ) {
+                        Row(
+                            modifier = Modifier.fillMaxWidth().height(44.dp).padding(horizontal = 8.dp),
+                            horizontalArrangement = Arrangement.End,
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            IconButton(
+                                onClick = { searchBarOpen = !searchBarOpen; if (!searchBarOpen) query = "" },
+                                modifier = Modifier.size(40.dp)
+                            ) {
+                                Icon(Icons.Default.Search, contentDescription = "Search in PDF")
+                            }
+                            IconButton(
+                                onClick = { settingsOpen = true },
+                                modifier = Modifier.size(40.dp)
+                            ) {
+                                Icon(Icons.Default.Settings, contentDescription = "Settings")
+                            }
                         }
-                        IconButton(onClick = { settingsOpen = true }) { Icon(Icons.Default.Settings, "Settings") }
                     }
-                    )
                 }
             },
             floatingActionButton = {
