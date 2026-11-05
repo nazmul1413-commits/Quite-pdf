@@ -546,7 +546,7 @@ private fun PdfPageItem(
     var dragEnd by remember(pageIndex){mutableStateOf<Offset?>(null)}
     LaunchedEffect(renderer,pageIndex){
         pageBitmap=runCatching{renderMutex.withLock{renderer.openPage(pageIndex).use{pdfPage->
-            val w=1500; val h=(w.toFloat()*pdfPage.height/pdfPage.width).toInt().coerceAtLeast(1)
+            val w=1100; val h=(w.toFloat()*pdfPage.height/pdfPage.width).toInt().coerceAtLeast(1)
             Bitmap.createBitmap(w,h,Bitmap.Config.ARGB_8888).also{it.eraseColor(AndroidColor.WHITE);pdfPage.render(it,null,null,PdfRenderer.Page.RENDER_MODE_FOR_DISPLAY)}
         }}}.getOrNull()
     }
