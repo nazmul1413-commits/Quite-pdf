@@ -200,8 +200,8 @@ fun QuietPdfApp() {
             )
         }
         Scaffold(
-            topBar = if (fullScreen) null else {
-                TopAppBar(
+            topBar = {
+                if (!fullScreen) TopAppBar(
                     title = {
                         Column {
                             Text("Quiet PDF", fontWeight = FontWeight.SemiBold)
@@ -217,8 +217,8 @@ fun QuietPdfApp() {
                     }
                 )
             },
-            floatingActionButton = if (fullScreen || currentUri != null) null else {
-                FloatingActionButton(onClick = { picker.launch(arrayOf("application/pdf")) }) {
+            floatingActionButton = {
+                if (!fullScreen && currentUri == null) FloatingActionButton(onClick = { picker.launch(arrayOf("application/pdf")) }) {
                     Icon(Icons.Default.Add, "Open PDF")
                 }
             }
