@@ -395,6 +395,9 @@ fun QuietPdfApp() {
                         verticalAlignment = Alignment.CenterVertically,
                         horizontalArrangement = Arrangement.Start
                     ) {
+                        IconButton(onClick = { searchBarOpen = true }, modifier = Modifier.size(38.dp)) {
+                            Icon(Icons.Default.Search, contentDescription = "Search in PDF")
+                        }
                         IconButton(onClick = { editMode = !editMode; message = if (editMode) "Reading mode" else "Choose a tool and annotate the page" }, modifier = Modifier.size(38.dp)) {
                             Icon(if (editMode) Icons.Default.Done else Icons.Default.Edit, contentDescription = if (editMode) "Finish annotating" else "Annotate")
                         }
@@ -484,18 +487,35 @@ fun QuietPdfApp() {
                                 translationY = documentPan.y
                             }
                             .pointerInput(Unit) {
-                                detectTransformGestures(
-                                    panZoomLock = false
-                                ) { centroid, pan, zoomChange, _ ->
-                                    val previousZoom = documentZoom.coerceAtLeast(0.001f)
-                                    val nextZoom = (previousZoom * zoomChange).coerceIn(1f, 8f)
-                                    val scaleChange = nextZoom / previousZoom
-                                    documentZoom = nextZoom
-                                    if (nextZoom <= 1f) {
-                                        documentPan = Offset.Zero
-                                    } else {
-                                        documentPan = (documentPan - centroid) * scaleChange + centroid + pan
-                                    }
+                                // Only a two-finger gesture controls zoom. One-finger
+                                // drags are left entirely to LazyColumn for page scrolling.
+                                awaitEachGesture {
+                                    awaitFirstDown(requireUnconsumed = false)
+                                    do {
+                                        val event = awaitPointerEvent()
+                                        val pressed = event.changes.filter { it.pressed }
+                                        if (pressed.size >= 2) {
+                                            val oldCenter = Offset(
+                                                pressed.map { it.previousPosition.x }.average().toFloat(),
+                                                pressed.map { it.previousPosition.y }.average().toFloat()
+                                            )
+                                            val newCenter = Offset(
+                                                pressed.map { it.position.x }.average().toFloat(),
+                                                pressed.map { it.position.y }.average().toFloat()
+                                            )
+                                            val oldDistance = pressed.map {
+                                                (it.previousPosition - oldCenter).getDistance()
+                                            }.average().toFloat()
+                                            val newDistance = pressed.map {
+                                                (it.position - newCenter).getDistance()
+                                            }.average().toFloat()
+                                            if (oldDistance > 0f && newDistance > 0f) {
+                                                documentZoom = (documentZoom * (newDistance / oldDistance)).coerceIn(1f, 8f)
+                                                documentPan = Offset.Zero
+                                            }
+                                            event.changes.forEach { it.consume() }
+                                        }
+                                    } while (event.changes.any { it.pressed })
                                 }
                             }
                     ) {
@@ -606,42 +626,31 @@ fun QuietPdfApp() {
                 val outcome = withContext(Dispatchers.IO) {
                     runCatching {
                         val matches = ArrayList<Int>()
-                        // Android's native PDF search engine is used on Android 15+
-                        // because it returns actual page matches and avoids re-parsing
-                        // a temporary copy of the document for every search.
-                        if (android.os.Build.VERSION.SDK_INT >= 35) {
-                            for (index in 0 until pdfRenderer.pageCount) {
-                                renderMutex.withLock {
-                                    pdfRenderer.openPage(index).use { pdfPage ->
-                                        if (pdfPage.searchText(term).isNotEmpty()) matches.add(index)
-                                    }
+                        // Use PDFBox consistently across Android versions. This searches
+                        // the document text layer; scanned/image-only PDFs require OCR.
+                        val uri = currentUri ?: error("The PDF is no longer open.")
+                        val temp = File.createTempFile("quiet_search_", ".pdf", context.cacheDir)
+                        try {
+                            context.contentResolver.openInputStream(uri)?.use { input ->
+                                FileOutputStream(temp).use { output -> input.copyTo(output) }
+                            } ?: error("Android could not read this PDF file.")
+                            PDDocument.load(temp).use { doc ->
+                                val stripper = PDFTextStripper().apply {
+                                    sortByPosition = true
+                                    setShouldSeparateByBeads(false)
+                                }
+                                for (index in 0 until doc.numberOfPages) {
+                                    stripper.startPage = index + 1
+                                    stripper.endPage = index + 1
+                                    val extracted = stripper.getText(doc)
+                                        .replace('\\u00A0', ' ')
+                                        .replace(Regex("[\\\\t\\\\r\\\\n\\\\u000C]+"), " ")
+                                        .replace(Regex(" +"), " ")
+                                    if (extracted.contains(term, ignoreCase = true)) matches.add(index)
                                 }
                             }
-                        } else {
-                            val uri = currentUri ?: error("The PDF is no longer open.")
-                            val temp = File.createTempFile("quiet_search_", ".pdf", context.cacheDir)
-                            try {
-                                context.contentResolver.openInputStream(uri)?.use { input ->
-                                    FileOutputStream(temp).use { output -> input.copyTo(output) }
-                                } ?: error("Android could not read this PDF file.")
-                                PDDocument.load(temp).use { doc ->
-                                    val stripper = PDFTextStripper().apply {
-                                        sortByPosition = true
-                                        setShouldSeparateByBeads(false)
-                                    }
-                                    for (index in 0 until doc.numberOfPages) {
-                                        stripper.startPage = index + 1
-                                        stripper.endPage = index + 1
-                                        val extracted = stripper.getText(doc)
-                                            .replace('\u00A0', ' ')
-                                            .replace(Regex("[\\t\\r\\n\\u000C]+"), " ")
-                                            .replace(Regex(" +"), " ")
-                                        if (extracted.contains(term, ignoreCase = true)) matches.add(index)
-                                    }
-                                }
-                            } finally {
-                                temp.delete()
-                            }
+                        } finally {
+                            temp.delete()
                         }
                         matches
                     }
