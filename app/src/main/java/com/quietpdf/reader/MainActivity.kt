@@ -42,12 +42,14 @@ import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.graphics.graphicsLayer
-import androidx.compose.foundation.gestures.detectTransformGestures
+import androidx.compose.foundation.gestures.awaitEachGesture
+import androidx.compose.foundation.gestures.awaitFirstDown
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.graphics.Path
 import androidx.compose.ui.graphics.StrokeCap
 import androidx.compose.ui.graphics.nativeCanvas
 import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.input.pointer.awaitPointerEvent
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalView
 import androidx.core.view.WindowCompat
@@ -318,6 +320,7 @@ fun QuietPdfApp() {
             topBar = {
                 AnimatedVisibility(visible = !fullScreen, enter = fadeIn(tween(220)) + slideInVertically(tween(220)) { -it / 3 }, exit = fadeOut(tween(160)) + slideOutVertically(tween(160)) { -it / 3 }) {
                     Surface(
+                        modifier = Modifier.statusBarsPadding(),
                         color = MaterialTheme.colorScheme.surface,
                         tonalElevation = 0.dp
                     ) {
@@ -572,10 +575,40 @@ private fun PdfPageItem(
                     translationY = pan.y
                 }
                 .pointerInput(pageIndex) {
-                    detectTransformGestures { _, gesturePan, gestureZoom, _ ->
-                        val nextZoom = (zoom * gestureZoom).coerceIn(1f, 5f)
-                        zoom = nextZoom
-                        pan = if (nextZoom <= 1f) Offset.Zero else pan + gesturePan
+                    // Only handle two-finger gestures here. A one-finger drag must
+                    // remain available to LazyColumn for normal vertical scrolling.
+                    awaitEachGesture {
+                        awaitFirstDown(requireUnconsumed = false)
+                        var previousCentroid = Offset.Zero
+                        var previousSpan = 0f
+                        var trackingPinch = false
+                        do {
+                            val event = awaitPointerEvent()
+                            val pressed = event.changes.filter { it.pressed }
+                            if (pressed.size >= 2) {
+                                val centroid = Offset(
+                                    pressed.map { it.position.x }.average().toFloat(),
+                                    pressed.map { it.position.y }.average().toFloat()
+                                )
+                                val span = pressed.map {
+                                    val dx = it.position.x - centroid.x
+                                    val dy = it.position.y - centroid.y
+                                    kotlin.math.sqrt(dx * dx + dy * dy)
+                                }.average().toFloat()
+                                if (trackingPinch && previousSpan > 0f) {
+                                    val nextZoom = (zoom * (span / previousSpan)).coerceIn(1f, 5f)
+                                    zoom = nextZoom
+                                    pan = if (nextZoom <= 1f) Offset.Zero else pan + (centroid - previousCentroid)
+                                    event.changes.forEach { if (it.pressed) it.consume() }
+                                }
+                                previousCentroid = centroid
+                                previousSpan = span
+                                trackingPinch = true
+                            } else {
+                                trackingPinch = false
+                                previousSpan = 0f
+                            }
+                        } while (event.changes.any { it.pressed })
                     }
                 }
                 .clickable(enabled=!editMode){onTapPage()},
