@@ -22,6 +22,7 @@ import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.gestures.detectDragGestures
+import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
@@ -39,6 +40,9 @@ import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.asImageBitmap
+import androidx.compose.ui.graphics.Path
+import androidx.compose.ui.graphics.StrokeCap
+import androidx.compose.ui.graphics.nativeCanvas
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalView
@@ -59,9 +63,12 @@ import com.tom_roush.pdfbox.pdmodel.graphics.state.PDExtendedGraphicsState
 import com.tom_roush.pdfbox.text.PDFTextStripper
 import java.io.File
 import java.io.FileOutputStream
+import android.graphics.Paint as AndroidPaint
+import android.util.Base64
+import com.tom_roush.pdfbox.pdmodel.font.PDType1Font
 
 data class DocItem(val uri: String, val name: String, val lastPage: Int = 0)
-data class Mark(val page: Int, val left: Float, val top: Float, val right: Float, val bottom: Float)
+data class Annotation(val page: Int, val kind: String, val points: List<Offset>, val color: Int = 0xFFFFD600.toInt(), val width: Float = 3f, val text: String = "")
 
 class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -94,7 +101,10 @@ fun QuietPdfApp() {
     var searchBarOpen by remember { mutableStateOf(false) }
     var message by remember { mutableStateOf("") }
     var docs by remember { mutableStateOf(listOf<DocItem>()) }
-    var marks by remember { mutableStateOf(listOf<Mark>()) }
+    var annotations by remember { mutableStateOf(listOf<Annotation>()) }
+    var activeTool by remember { mutableStateOf("HIGHLIGHTER") }
+    var pendingText by remember { mutableStateOf<Pair<Int, Offset>?>(null) }
+    var textDraft by remember { mutableStateOf("") }
     var drawing by remember { mutableStateOf(false) }
     var editMode by remember { mutableStateOf(false) }
     var fullScreen by remember { mutableStateOf(false) }
@@ -111,9 +121,13 @@ fun QuietPdfApp() {
             if (p.size >= 3) DocItem(p[0], p[1], p[2].toIntOrNull() ?: 0) else null
         }
     }
-    fun saveMarks() {
-        val encoded = marks.joinToString("\n") { "${it.page},${it.left},${it.top},${it.right},${it.bottom}" }
-        prefs.edit().putString("marks_${currentUri}", encoded).apply()
+    fun saveAnnotations() {
+        val encoded = annotations.joinToString("\n") { item ->
+            val pts = item.points.joinToString(";") { "${it.x},${it.y}" }
+            val txt = Base64.encodeToString(item.text.toByteArray(Charsets.UTF_8), Base64.NO_WRAP)
+            listOf(item.page,item.kind,item.color,item.width,txt,pts).joinToString("|")
+        }
+        prefs.edit().putString("annotations_${currentUri}", encoded).apply()
     }
     fun openPdf(uri: Uri, name: String) {
         try {
@@ -127,10 +141,14 @@ fun QuietPdfApp() {
             currentName = name
             pageCount = r.pageCount
             page = prefs.getInt("page_${uri}", 0).coerceIn(0, (r.pageCount - 1).coerceAtLeast(0))
-            marks = prefs.getString("marks_${uri}", "")!!.lines().mapNotNull { line ->
-                val a = line.split(",")
-                if (a.size == 5) runCatching { Mark(a[0].toInt(), a[1].toFloat(), a[2].toFloat(), a[3].toFloat(), a[4].toFloat()) }.getOrNull() else null
-            }
+            val savedAnnotations = prefs.getString("annotations_${uri}", null)
+            annotations = if (savedAnnotations != null) savedAnnotations.lines().mapNotNull { line ->
+                runCatching {
+                    val parts = line.split("|", limit=6)
+                    val points = parts[5].split(";").map { pair -> pair.split(",").let { Offset(it[0].toFloat(),it[1].toFloat()) } }
+                    Annotation(parts[0].toInt(),parts[1],points,parts[2].toInt(),parts[3].toFloat(),String(Base64.decode(parts[4],Base64.DEFAULT),Charsets.UTF_8))
+                }.getOrNull()
+            } else emptyList()
             docs = listOf(DocItem(uri.toString(), name, page)) + docs.filterNot { it.uri == uri.toString() }
             saveDocs()
             message = ""
@@ -190,7 +208,7 @@ fun QuietPdfApp() {
     // Export annotations into a separate PDF copy; the original remains untouched.
     val exportLauncher = rememberLauncherForActivityResult(ActivityResultContracts.CreateDocument("application/pdf")) { destination ->
         val source = currentUri
-        val annotations = marks.toList()
+        val annotationsToExport = annotations.toList()
         if (destination != null && source != null) {
             scope.launch {
                 val exported = withContext(Dispatchers.IO) {
@@ -200,7 +218,7 @@ fun QuietPdfApp() {
                             FileOutputStream(temp).use { output -> input.copyTo(output) }
                         } ?: error("Cannot read the original PDF")
                         PDDocument.load(temp).use { document ->
-                            annotations.groupBy { it.page }.forEach { (pageIndex, pageMarks) ->
+                            annotationsToExport.groupBy { it.page }.forEach { (pageIndex, pageMarks) ->
                                 if (pageIndex in 0 until document.numberOfPages) {
                                     val pdfPage = document.getPage(pageIndex)
                                     val bounds = pdfPage.mediaBox
