@@ -182,6 +182,7 @@ fun QuietPdfApp() {
             fullScreen = true
             pageCount = r.pageCount
             page = prefs.getInt("page_${uri}", 0).coerceIn(0, (r.pageCount - 1).coerceAtLeast(0))
+            scope.launch { listState.scrollToItem(page) }
             val savedAnnotations = prefs.getString("annotations_${uri}", null)
             annotations = if (savedAnnotations != null) savedAnnotations.lines().mapNotNull { line ->
                 runCatching {
@@ -645,7 +646,7 @@ private fun PdfPageItem(
     var pageBitmap by remember(pageIndex,renderer){mutableStateOf<Bitmap?>(null)}
     var strokePoints by remember(pageIndex){mutableStateOf(listOf<Offset>())}
     var dragEnd by remember(pageIndex){mutableStateOf<Offset?>(null)}
-    var settledZoom by remember(pageIndex, renderer) { mutableFloatStateOf(1f) }
+    var settledZoom by remember(pageIndex, renderer) { mutableFloatStateOf(documentZoom) }
     LaunchedEffect(documentZoom) {
         delay(420)
         settledZoom = documentZoom
